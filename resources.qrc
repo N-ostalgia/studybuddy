@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RCC>
+    <qresource prefix="/">
+        <!-- App Icons -->
+        <file>icons/app_icon.svg</file>
+        
+
+
+ <!-- Achievement Icons -->
+        <file>icons/focus_master.png</file>
+        <file>icons/streak_7.png</file>
+        <file>icons/time_4h.png</file>
+        <file>icons/night_owl.png</file>
+        <file>icons/early_bird.png</file>
+        <file>icons/perfect_day.png</file>
+        <file>icons/first_session.png</file>
+        <file>icons/first_pomodoro.png</file> 
+       <!--Sound Effects -->
+        <file>sounds/alert.wav</file> 
+    </qresource>
+</RCC> 
