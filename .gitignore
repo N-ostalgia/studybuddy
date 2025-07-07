@@ -1,0 +1,10 @@
+*.pro.user
+*.o
+*.obj
+*.exe
+*.log
+*.tmp
+build/
+bin/
+debug/
+release/
