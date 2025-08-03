@@ -13,7 +13,7 @@ class StudyStreak : public QObject
     Q_OBJECT
 
 public:
-    explicit StudyStreak(QObject *parent = nullptr);
+    explicit StudyStreak(QSqlDatabase& db, QObject *parent = nullptr);
     ~StudyStreak();
 
     // Streak Management
@@ -44,12 +44,11 @@ signals:
     void studyTimeUpdated(int totalMinutes);
 
 private:
-    QSqlDatabase db;
+    QSqlDatabase& db;
     int currentStreak;
     int longestStreak;
     QDate lastStudyDate;
     
-    bool initializeDatabase();
     bool updateStreakCount();
     bool checkMilestones();
     void emitMilestoneSignals(const QList<int> &newMilestones);

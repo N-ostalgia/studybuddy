@@ -24,24 +24,23 @@ public:
     // Chart Generation
     QChart* createFocusChart(const QDate &startDate, const QDate &endDate);
     QChart* createProductivityChart(const QDate &startDate, const QDate &endDate);
-    QChart* createStreakChart(const QDate &startDate, const QDate &endDate);
-    QChart* createSubjectDistributionChart(const QDate &startDate, const QDate &endDate);
-    QChart* createEffectivenessChart(const QDate &startDate, const QDate &endDate);
-    QChart* createDistractionChart(const QDate &startDate, const QDate &endDate);
     QChart* createGoalCompletionChart(const QDate &startDate, const QDate &endDate);
-    
+    QChart* createSubjectTimeChart(const QDate &startDate, const QDate &endDate);
+    QChart* createDistractionBarChart(const QDate &startDate, const QDate &endDate);
+
     // Data Analysis
     QMap<QString, float> getFocusPatterns() const;
     QMap<QString, int> getProductivityByHour() const;
     QMap<QString, int> getProductivityByDay() const;
-    QMap<QString, float> getSubjectPerformance() const;
-    
+    QStringList getNeglectedSubjects(int days, const QDate &endDate);
+
+
     // Statistics
     float getAverageFocusScore() const;
     int getMostProductiveHour() const;
     QString getMostProductiveDay() const;
-    QString getBestPerformingSubject() const;
-    
+   
+
     // Predictions
     QMap<QString, float> predictOptimalStudyTimes() const;
     float predictNextSessionFocus() const;
@@ -59,7 +58,7 @@ private:
     QSqlDatabase &db;
     QMap<QString, QList<float>> focusHistory;
     QMap<QString, QList<int>> productivityHistory;
-    
+
     bool initializeDatabase();
     void loadHistoricalData(const QDate &startDate, const QDate &endDate);
     QList<float> calculateMovingAverage(const QList<float> &data, int window) const;
@@ -68,4 +67,4 @@ private:
     QString formatDayOfWeek(int day) const;
 };
 
-#endif // ANALYTICS_H 
+#endif // ANALYTICS_H

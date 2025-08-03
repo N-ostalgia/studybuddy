@@ -5,7 +5,7 @@
 #include <QDebug>
 #include <QSqlRecord>
 
-StudySession::StudySession(QSqlDatabase db, QObject* parent)
+StudySession::StudySession(QSqlDatabase& db, QObject* parent)
     : QObject(parent), db(db) {}
 
 int StudySession::createSession(int plannedSessionId, const QString& type, const QString& notes)

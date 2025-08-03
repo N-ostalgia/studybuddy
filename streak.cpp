@@ -1,13 +1,11 @@
 #include "streak.h"
 #include <QDebug>
 #include <QSqlError>
+#include <QCoreApplication>
 
-StudyStreak::StudyStreak(QObject *parent)
-    : QObject(parent)
-    , currentStreak(0)
-    , longestStreak(0)
+StudyStreak::StudyStreak(QSqlDatabase& db, QObject *parent)
+    : QObject(parent), db(db), currentStreak(0), longestStreak(0)
 {
-    initializeDatabase();
     initializeStreaks();
 }
 
@@ -16,39 +14,6 @@ StudyStreak::~StudyStreak()
     if (db.isOpen()) {
         db.close();
     }
-}
-
-bool StudyStreak::initializeDatabase()
-{
-    if (QSqlDatabase::contains("streak_connection")) {
-        db = QSqlDatabase::database("streak_connection");
-    } else {
-        db = QSqlDatabase::addDatabase("QSQLITE", "streak_connection");
-        db.setDatabaseName("study_streaks.db");
-    }
-
-    if (!db.open()) {
-        qDebug() << "Error: Failed to open database:" << db.lastError().text();
-        return false;
-    }
-
-    // Create the study_streaks table if it doesn't exist
-    QSqlQuery query(db);
-    QString createTableQuery = 
-        "CREATE TABLE IF NOT EXISTS study_streaks ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "date TEXT NOT NULL UNIQUE, "
-        "study_minutes INTEGER NOT NULL, "
-        "streak_count INTEGER NOT NULL, "
-        "created_at TEXT NOT NULL"
-        ")";
-
-    if (!query.exec(createTableQuery)) {
-        qDebug() << "Error: Failed to create table:" << query.lastError().text();
-        return false;
-    }
-
-    return true;
 }
 
 bool StudyStreak::initializeStreaks()

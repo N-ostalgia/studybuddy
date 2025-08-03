@@ -27,6 +27,7 @@ struct GoalInfo {
     QString recurrenceValue;
     QString category;
     QDate lastGeneratedDate;
+    QStringList resources; // New field for resources
 };
 
 Q_DECLARE_METATYPE(GoalInfo)
@@ -36,18 +37,19 @@ class StudyGoal : public QObject
     Q_OBJECT
 
 public:
-    explicit StudyGoal(QObject *parent = nullptr);
+    explicit StudyGoal(QSqlDatabase& db, QObject *parent = nullptr);
     ~StudyGoal();
 
     // CRUD Operations
-    bool createGoal(const QString &subject, int targetMinutes, const QString &notes = "", const QString &recurrenceType = "None", const QString &recurrenceValue = "", const QString &category = "Uncategorized");
-    bool updateGoal(int goalId, const QString &subject, int targetMinutes, const QString &notes, const QString &recurrenceType, const QString &recurrenceValue, const QString &category);
+    bool createGoal(const QString &subject, int targetMinutes, const QString &notes = "", const QString &recurrenceType = "None", const QString &recurrenceValue = "", const QString &category = "Uncategorized", const QStringList &resources = QStringList());
+    bool updateGoal(int goalId, const QString &subject, int targetMinutes, const QString &notes, const QString &recurrenceType, const QString &recurrenceValue, const QString &category, const QStringList &resources = QStringList());
     bool deleteGoal(int goalId);
     
     // Goal Retrieval
     QList<GoalInfo> getGoalsForDate(const QDate &date) const;
     QList<QMap<QString, QVariant>> getGoalsForSubject(const QString &subject) const;
     QMap<QString, QVariant> getGoalDetails(int goalId) const;
+    QList<QString> getResourcesForGoal(int goalId) const;
     
     // Progress Tracking
     int getProgress(int goalId) const;
@@ -58,10 +60,12 @@ public:
     // tracking methods for Pomodoro integration
     void connectToPomodoroTimer(PomodoroTimer *timer);
     void startTrackingGoal(int goalId, int initialElapsedSeconds = 0);
+    // Now adds progress when tracking is stopped
     void stopTrackingGoal();
 
     // Recurring Goals
     void generateRecurringGoals(int parentGoalId);
+    void checkAndGenerateAllRecurringGoals(); 
 
     // Statistics
     QMap<QString, int> getSubjectStats(const QDate &startDate, const QDate &endDate);
@@ -79,7 +83,7 @@ signals:
     void goalTrackingStopped();
 
 private:
-    QSqlDatabase db;
+    QSqlDatabase& db;
     bool initializeDatabase();
     bool executeQuery(const QString &query, QSqlQuery &result);
 

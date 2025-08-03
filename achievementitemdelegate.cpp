@@ -1,6 +1,5 @@
 #include "achievementitemdelegate.h"
 #include <QDebug>
-
 AchievementItemDelegate::AchievementItemDelegate(QObject *parent)
     : QStyledItemDelegate(parent)
 {

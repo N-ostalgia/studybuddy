@@ -1,11 +1,11 @@
 #include "achievements.h"
 #include <QDebug>
 #include <QSqlError>
+#include <QCoreApplication>
 
-Achievement::Achievement(QObject *parent)
-    : QObject(parent)
+Achievement::Achievement(QSqlDatabase& db, QObject *parent)
+    : QObject(parent), db(db)
 {
-    initializeDatabase();
     loadAchievementDefinitions();
 
     connect(this, &Achievement::sessionCompleted, this, [this]() {
@@ -22,41 +22,6 @@ Achievement::~Achievement()
     if (db.isOpen()) {
         db.close();
     }
-}
-
-bool Achievement::initializeDatabase()
-{
-    if (QSqlDatabase::contains("achievements_connection")) {
-        db = QSqlDatabase::database("achievements_connection");
-    } else {
-        db = QSqlDatabase::addDatabase("QSQLITE", "achievements_connection");
-        db.setDatabaseName("achievements.db");
-    }
-
-    if (!db.open()) {
-        qDebug() << "Error: Failed to open database:" << db.lastError().text();
-        return false;
-    }
-
-    QSqlQuery query(db);
-    QString createTableQuery = 
-        "CREATE TABLE IF NOT EXISTS achievements ("
-        "id TEXT PRIMARY KEY, "
-        "name TEXT NOT NULL, "
-        "description TEXT NOT NULL, "
-        "category TEXT NOT NULL, "
-        "required_value INTEGER NOT NULL, "
-        "icon_path TEXT, "
-        "unlocked_at TEXT, "
-        "progress INTEGER DEFAULT 0"
-        ")";
-
-    if (!query.exec(createTableQuery)) {
-        qDebug() << "Error: Failed to create table:" << query.lastError().text();
-        return false;
-    }
-
-    return true;
 }
 
 void Achievement::loadAchievementDefinitions()
@@ -333,11 +298,6 @@ void Achievement::trackFirstPomodoro()
 
 bool Achievement::initializeAchievements()
 {
-    if (!initializeDatabase()) {
-        qDebug() << "Error: Failed to initialize database for achievements.";
-        return false;
-    }
-
     loadAchievementDefinitions();
     return true;
 } 

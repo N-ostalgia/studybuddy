@@ -13,7 +13,7 @@ class Achievement : public QObject
     Q_OBJECT
 
 public:
-    explicit Achievement(QObject *parent = nullptr);
+    explicit Achievement(QSqlDatabase& db, QObject *parent = nullptr);
     ~Achievement();
 
     // Achievement Management
@@ -64,11 +64,10 @@ signals:
     void pomodoroCompleted();
 
 private:
-    QSqlDatabase db;
+    QSqlDatabase& db;
     QMap<QString, AchievementInfo> achievementDefinitions;
     QMap<QString, int> achievementProgress;
     
-    bool initializeDatabase();
     void loadAchievementDefinitions();
     bool checkAchievementConditions(const QString &achievementId);
     void updateProgress(const QString &achievementId, int progress);

@@ -15,7 +15,10 @@ CONFIG(debug, debug|release): {
     LIBS += -LC:/Users/bouib/Desktop/opencv/build/x64/vc16/lib \
             -lopencv_world4110d
 }
-
+  QT += webenginewidgets
+  QT += pdf pdfwidgets
+  QT += network
+  QT += axcontainer
 SOURCES += \
     main.cpp \
     mainwindow.cpp \
@@ -25,7 +28,8 @@ SOURCES += \
     streak.cpp \
     analytics.cpp \
     achievementitemdelegate.cpp \
-     studysession.cpp
+     studysession.cpp \
+     survey.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -35,7 +39,8 @@ HEADERS += \
     streak.h \
     analytics.h \
     achievementitemdelegate.h \
-      studysession.h
+      studysession.h \
+      survey.h 
 
 FORMS += \
     mainwindow.ui

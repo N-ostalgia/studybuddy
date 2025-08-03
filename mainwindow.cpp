@@ -2,6 +2,7 @@
 #include "./ui_mainwindow.h"
 #include "analytics.h"
 #include "achievements.h"
+#include "survey.h"
 #include <QMessageBox>
 #include <QFileInfo>
 #include <QCoreApplication>
@@ -41,19 +42,47 @@
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QDesktopServices>
-
+#include <QTimer>
+#include <QDate>
+#include <QFrame>
+#include <QSlider>
+#include <QCheckBox>
+#include <QWebEngineView>
+#include <QPdfView>
+#include <QPdfDocument>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QSplitter>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QFile>
+#include <QInputDialog>
+#include <QBuffer>
+#include <QImageReader>
+#ifdef Q_OS_WIN
+#include <QAxObject>
+#endif
+#include <QSettings>
+#include <QTabBar>
 
 bool MainWindow::initializeDatabase()
 {
-    if (QSqlDatabase::contains("qt_sql_default_connection")) {
-        QSqlDatabase::removeDatabase("qt_sql_default_default_connection");
+    // Use a single connection name for the unified database
+    const QString connName = "StudyGoalsConnection";
+    if (QSqlDatabase::contains(connName)) {
+        db = QSqlDatabase::database(connName);
+    } else {
+        db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        QString dbPath = QCoreApplication::applicationDirPath() + "/studybuddy.db";
+    db.setDatabaseName(dbPath);
     }
 
-    db = QSqlDatabase::addDatabase("QSQLITE");
-    QString dbPath = QCoreApplication::applicationDirPath() + "/face_detection.db";
-    db.setDatabaseName(dbPath);
-
-    qDebug() << "Attempting to open database at:" << dbPath;
+    qDebug() << "Attempting to open database at:" << db.databaseName();
 
     if (!db.open()) {
         qDebug() << "Error: Unable to open database" << db.lastError().text();
@@ -61,149 +90,45 @@ bool MainWindow::initializeDatabase()
         return false;
     }
 
-    qDebug() << "Database connected successfully at" << dbPath;
+    qDebug() << "Database connected successfully at" << db.databaseName();
 
     QSqlQuery query(db);
-    // Create the detections table
-    QString createTableQuery =
-        "CREATE TABLE IF NOT EXISTS detections ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "timestamp TEXT NOT NULL, "
-        "face_count INTEGER NOT NULL, "
-        "eyes_detected BOOLEAN NOT NULL, "
-        "blink_count INTEGER NOT NULL, "
-        "focus_score REAL NOT NULL)";
-
-    if (!query.exec(createTableQuery)) {
+    // Create all tables for the unified schema
+    QStringList createTableQueries = {
+        // detections
+        "CREATE TABLE IF NOT EXISTS detections (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, face_count INTEGER NOT NULL, eyes_detected BOOLEAN NOT NULL, blink_count INTEGER NOT NULL, focus_score REAL NOT NULL)",
+        // session_plans
+        "CREATE TABLE IF NOT EXISTS session_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL, goals TEXT, resource_link TEXT, mental_state TEXT, plan_date TEXT NOT NULL)",
+        // session_reviews
+        "CREATE TABLE IF NOT EXISTS session_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, session_plan_id INTEGER NOT NULL, focus_score REAL, distraction_events TEXT, effectiveness TEXT, notes TEXT, review_date TEXT NOT NULL, session_id INTEGER, FOREIGN KEY(session_plan_id) REFERENCES session_plans(id))",
+        // study_sessions
+        "CREATE TABLE IF NOT EXISTS study_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, planned_session_id INTEGER, start_time TEXT, end_time TEXT, type TEXT, notes TEXT)",
+        // goals
+        "CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL, target_minutes INTEGER NOT NULL, completed_minutes INTEGER DEFAULT 0, start_date TEXT NOT NULL, due_date TEXT, status TEXT DEFAULT 'Active', notes TEXT, recurrence_type TEXT DEFAULT 'None', recurrence_value TEXT, last_generated_date TEXT, category TEXT DEFAULT 'Uncategorized')",
+        // goal_resources
+        "CREATE TABLE IF NOT EXISTS goal_resources (id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL, description TEXT, FOREIGN KEY(goal_id) REFERENCES goals(id))",
+        // session_resources
+        "CREATE TABLE IF NOT EXISTS session_resources (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL, description TEXT, FOREIGN KEY(session_id) REFERENCES study_sessions(id))",
+        // session_goals
+        "CREATE TABLE IF NOT EXISTS session_goals (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL, goal_id INTEGER NOT NULL, FOREIGN KEY(session_id) REFERENCES study_sessions(id), FOREIGN KEY(goal_id) REFERENCES goals(id))",
+        // surveys
+        "CREATE TABLE IF NOT EXISTS surveys (id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER NOT NULL, timestamp TEXT NOT NULL, mood_emoji TEXT, distraction_level INTEGER, distractions TEXT, session_satisfaction INTEGER, goal_achieved TEXT, open_feedback TEXT, set_reminder INTEGER)",
+        // study_streaks
+        "CREATE TABLE IF NOT EXISTS study_streaks (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL UNIQUE, study_minutes INTEGER NOT NULL, streak_count INTEGER NOT NULL, created_at TEXT NOT NULL)",
+        // achievements
+        "CREATE TABLE IF NOT EXISTS achievements (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, category TEXT NOT NULL, required_value INTEGER NOT NULL, icon_path TEXT, unlocked_at TEXT, progress INTEGER DEFAULT 0)",
+        // free_time
+        "CREATE TABLE IF NOT EXISTS free_time (date TEXT PRIMARY KEY, morning_minutes INTEGER, evening_minutes INTEGER, night_minutes INTEGER)"
+    };
+    for (const QString& q : createTableQueries) {
+        if (!query.exec(q)) {
         qDebug() << "Error: Failed to create table" << query.lastError().text();
-        qDebug() << "Query was:" << createTableQuery;
+            qDebug() << "Query was:" << q;
         QMessageBox::critical(this, "Database Error", "Failed to create table: " + query.lastError().text());
         return false;
     }
-
-    if (!db.tables().contains("detections")) {
-        qDebug() << "Error: Table 'detections' was not created successfully";
-        QMessageBox::critical(this, "Database Error", "Failed to verify table creation");
-        return false;
     }
-
-    qDebug() << "Database table 'detections' initialized successfully";
-    qDebug() << "Available tables:" << db.tables();
-
-    // Create the session_plans table
-    QString createSessionPlansTableQuery =
-        "CREATE TABLE IF NOT EXISTS session_plans (" 
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, " 
-        "subject TEXT NOT NULL, " 
-        "goals TEXT, " 
-        "resource_link TEXT, " 
-        "mental_state TEXT, " 
-        "plan_date TEXT NOT NULL)";
-
-    if (!query.exec(createSessionPlansTableQuery)) {
-        qDebug() << "Error: Failed to create session_plans table" << query.lastError().text();
-        QMessageBox::critical(this, "Database Error", "Failed to create session_plans table: " + query.lastError().text());
-        return false;
-    }
-
-    qDebug() << "Database table 'session_plans' initialized successfully";
-
-    // Create the session_reviews table
-    QString createSessionReviewsTableQuery =
-        "CREATE TABLE IF NOT EXISTS session_reviews (" 
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, " 
-        "session_plan_id INTEGER NOT NULL, " 
-        "focus_score REAL, " 
-        "distraction_events TEXT, " 
-        "effectiveness TEXT, " 
-        "notes TEXT, " 
-        "review_date TEXT NOT NULL, " 
-        "FOREIGN KEY(session_plan_id) REFERENCES session_plans(id))";
-QSqlQuery checkReviewColQuery(db);
-checkReviewColQuery.exec("PRAGMA table_info(session_reviews)");
-bool hasSessionId = false;
-while (checkReviewColQuery.next()) {
-    if (checkReviewColQuery.value(1).toString() == "session_id") {
-        hasSessionId = true;
-        break;
-    }
-}
-if (!hasSessionId) {
-    QSqlQuery alterQuery(db);
-    alterQuery.exec("ALTER TABLE session_reviews ADD COLUMN session_id INTEGER");
-}
-
-    if (!query.exec(createSessionReviewsTableQuery)) {
-        qDebug() << "Error: Failed to create session_reviews table" << query.lastError().text();
-        QMessageBox::critical(this, "Database Error", "Failed to create session_reviews table: " + query.lastError().text());
-        return false;
-    }
-
-    qDebug() << "Database table 'session_reviews' initialized successfully";
-
-    // Add study_sessions table
-    QString createStudySessionsTableQuery =
-        "CREATE TABLE IF NOT EXISTS study_sessions ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "planned_session_id INTEGER, "
-        "start_time TEXT, "
-        "end_time TEXT, "
-        "type TEXT, "
-        "notes TEXT)";
-    if (!query.exec(createStudySessionsTableQuery)) {
-        qDebug() << "Error: Failed to create study_sessions table" << query.lastError().text();
-        QMessageBox::critical(this, "Database Error", "Failed to create study_sessions table: " + query.lastError().text());
-        return false;
-    }
-    qDebug() << "Database table 'study_sessions' initialized successfully";
-
-    // Create goal_resources table
-    QString createGoalResourcesTableQuery =
-        "CREATE TABLE IF NOT EXISTS goal_resources ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "goal_id INTEGER NOT NULL, "
-        "type TEXT NOT NULL, "
-        "value TEXT NOT NULL, "
-        "description TEXT, "
-        "FOREIGN KEY(goal_id) REFERENCES goals(id))";
-    if (!query.exec(createGoalResourcesTableQuery)) {
-        qDebug() << "Error: Failed to create goal_resources table" << query.lastError().text();
-        QMessageBox::critical(this, "Database Error", "Failed to create goal_resources table: " + query.lastError().text());
-        return false;
-    }
-    qDebug() << "Database table 'goal_resources' initialized successfully";
-
-    // Create session_resources table
-    QString createSessionResourcesTableQuery =
-        "CREATE TABLE IF NOT EXISTS session_resources ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "session_id INTEGER NOT NULL, "
-        "type TEXT NOT NULL, "
-        "value TEXT NOT NULL, "
-        "description TEXT, "
-        "FOREIGN KEY(session_id) REFERENCES study_sessions(id))";
-    if (!query.exec(createSessionResourcesTableQuery)) {
-        qDebug() << "Error: Failed to create session_resources table" << query.lastError().text();
-        QMessageBox::critical(this, "Database Error", "Failed to create session_resources table: " + query.lastError().text());
-        return false;
-    }
-    qDebug() << "Database table 'session_resources' initialized successfully";
-
-    // Create session_goals table
-    QString createSessionGoalsTableQuery =
-        "CREATE TABLE IF NOT EXISTS session_goals ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "session_id INTEGER NOT NULL, "
-        "goal_id INTEGER NOT NULL, "
-        "FOREIGN KEY(session_id) REFERENCES study_sessions(id), "
-        "FOREIGN KEY(goal_id) REFERENCES goals(id))";
-    if (!query.exec(createSessionGoalsTableQuery)) {
-        qDebug() << "Error: Failed to create session_goals table" << query.lastError().text();
-        QMessageBox::critical(this, "Database Error", "Failed to create session_goals table: " + query.lastError().text());
-        return false;
-    }
-    qDebug() << "Database table 'session_goals' initialized successfully";
-
+    qDebug() << "All tables for studybuddy.db initialized successfully";
     return true;
 }
 
@@ -226,7 +151,8 @@ MainWindow::MainWindow(QWidget *parent)
     , studySession(nullptr)
 {
     ui->setupUi(this);
-
+    setupCharts();
+    geminiNetworkManager = new QNetworkAccessManager(this);
     if (!initializeDatabase()) {
         QMessageBox::critical(this, "Error", "Failed to initialize the database.");
         return;
@@ -240,11 +166,14 @@ MainWindow::MainWindow(QWidget *parent)
     }
 
     // Create StudyGoal and StudyStreak objects
-    studyGoal = new StudyGoal(this);
-    studyStreak = new StudyStreak(this);
+    studyGoal = new StudyGoal(db, this);
+    studyStreak = new StudyStreak(db, this);
     pomodoroTimer = new PomodoroTimer(this);
-    achievementTracker = new Achievement(this);
+    achievementTracker = new Achievement(db, this);
     alertSound = new QSoundEffect(this);
+
+    // Ensure recurring goals are generated for today
+    studyGoal->checkAndGenerateAllRecurringGoals();
 
     if (!studyStreak->initializeStreaks()) {
         QMessageBox::critical(this, "Error", "Failed to initialize StudyStreak.");
@@ -259,6 +188,9 @@ MainWindow::MainWindow(QWidget *parent)
     setupDarkAcademiaTheme();
     loadSettings();
     
+    if (streakSummaryLabel) {
+        streakSummaryLabel->setText(QString("Current Streak: %1 days").arg(studyStreak->getCurrentStreak()));
+    }
     if (!loadFaceClassifier()) {
         QMessageBox::warning(this, "Warning", "Failed to load face classifier. Face detection will be disabled.");
         faceDetectionEnabled = false;
@@ -317,6 +249,35 @@ MainWindow::MainWindow(QWidget *parent)
     if (toolbar) {
         toolbar->addAction("Show Daily Summary", this, [this]() { showSummaryPopup(false); });
         toolbar->addAction("Show Weekly Summary", this, [this]() { showSummaryPopup(true); });
+        toolbar->addAction("Export All", this, &MainWindow::exportToCSV);
+        QAction* settingsAction = toolbar->addAction("Settings");
+        connect(settingsAction, &QAction::triggered, this, [this]() {
+            // Switch to the Settings tab (index may change if tabs are reordered)
+            for (int i = 0; i < tabWidget->count(); ++i) {
+                if (tabWidget->tabText(i) == "Settings") {
+                    tabWidget->setCurrentIndex(i);
+                    break;
+                }
+            }
+        });
+    }
+
+    progressUpdateTimer = new QTimer(this);
+    progressUpdateTimer->setInterval(1000); // 1 second
+    connect(progressUpdateTimer, &QTimer::timeout, this, &MainWindow::updateGoalProgressBars);
+
+    // At the end of MainWindow constructor, after UI setup:
+    notifyOverdueAndTodayGoals();
+
+    // After daily summary and after UI is shown, show overlay walkthrough if not shown before
+    QSettings settings("StudyBuddy", "FocusMonitor");
+    bool walkthroughShown = settings.value("walkthroughShown", false).toBool();
+    if (!walkthroughShown) {
+        QTimer::singleShot(500, this, [this]() {
+            startWalkthroughOverlay();
+            QSettings settings("StudyBuddy", "FocusMonitor");
+            settings.setValue("walkthroughShown", true);
+        });
     }
 }
 
@@ -329,9 +290,13 @@ void MainWindow::setupUI()
     // Create and add tabs
     createDashboardTab();
     createWebcamTab();
-    createAnalyticsTab();
-    createSettingsTab();
+    createBuddyChatTab();
     createAchievementsTab();
+    createSurveysTab();
+    createAnalyticsTab();
+    createCalendarTab();
+    createSettingsTab();
+    createHelpTab();
 
     // Create toolbar
     QToolBar *toolbar = addToolBar("Main Toolbar");
@@ -339,10 +304,7 @@ void MainWindow::setupUI()
     toolbar->addAction("Stop", this, &MainWindow::stopWebcam);
     toolbar->addAction("History", this, &MainWindow::showDetectionHistory);
     toolbar->addAction("Export", this, &MainWindow::exportData);
-    toolbar->addAction("Settings", this, &MainWindow::showSettings);
-    toolbar->addAction("Plan Session", this, &MainWindow::createSessionPlanner);
-    toolbar->addAction("Review Session", this, &MainWindow::implementSessionReview);
-    toolbar->addAction("Export All", this, &MainWindow::exportToCSV);
+    toolbar->addAction("Yearly Activity", this, &MainWindow::showYearlyActivityDialog);
 }
 
 void MainWindow::createWebcamTab()
@@ -361,7 +323,7 @@ void MainWindow::createWebcamTab()
     startButton = new QPushButton("Start Session");
     stopButton = new QPushButton("Stop Session");
     enableFaceDetectionCheckbox = new QCheckBox("Enable Face Detection");
-    
+    enableFaceDetectionCheckbox->setChecked(true);
     controlsLayout->addWidget(startButton);
     controlsLayout->addWidget(stopButton);
     controlsLayout->addWidget(enableFaceDetectionCheckbox);
@@ -494,8 +456,8 @@ void MainWindow::createPomodoroSection(QVBoxLayout *parentLayout)
 
 void MainWindow::createGoalsSection(QVBoxLayout *parentLayout)
 {
-    // Goal Creation Section
-    QGroupBox *createGoalGroup = new QGroupBox("Create New Goal");
+    // Goal Creation Section (unchanged)
+    createGoalGroup = new QGroupBox("Create New Goal");
     QFormLayout *createGoalLayout = new QFormLayout(createGoalGroup);
 
     goalSubjectInput = new QLineEdit();
@@ -503,11 +465,9 @@ void MainWindow::createGoalsSection(QVBoxLayout *parentLayout)
     goalTargetMinutesInput->setRange(1, 1000);
     goalNotesInput = new QTextEdit();
     
-    // category combo box
     goalCategoryCombo = new QComboBox();
     goalCategoryCombo->addItems({"Uncategorized", "Academic", "Personal", "Work", "Health", "Other"});
 
-    // recurrence controls
     recurrenceTypeCombo = new QComboBox();
     recurrenceTypeCombo->addItems({"None", "Daily", "Weekly", "Monthly"});
     recurrenceValueInput = new QLineEdit();
@@ -517,6 +477,40 @@ void MainWindow::createGoalsSection(QVBoxLayout *parentLayout)
     connect(recurrenceTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             [this](int index) {
                 recurrenceValueInput->setEnabled(index > 0);
+            });
+
+    // --- Resources input ---
+    QHBoxLayout *resourceInputLayout = new QHBoxLayout();
+    QLineEdit *resourceInput = new QLineEdit();
+    resourceInput->setPlaceholderText("Paste YouTube link or file path...");
+    QPushButton *browseResourceBtn = new QPushButton("Browse");
+    resourceInputLayout->addWidget(resourceInput);
+    resourceInputLayout->addWidget(browseResourceBtn);
+    QListWidget *resourceList = new QListWidget();
+    resourceList->setMinimumHeight(40);
+    QPushButton *addResourceBtn = new QPushButton("Add Resource");
+    QVBoxLayout *resourceSection = new QVBoxLayout();
+    resourceSection->addLayout(resourceInputLayout);
+    resourceSection->addWidget(addResourceBtn);
+    resourceSection->addWidget(resourceList);
+    createGoalLayout->addRow("Resources:", resourceSection);
+    // Store resources in a QStringList
+    QStringList *resources = new QStringList();
+    connect(browseResourceBtn, &QPushButton::clicked, this, [resourceInput, this]() {
+        QString file = QFileDialog::getOpenFileName(this, "Select Resource", QString(), "All Files (*.*)");
+        if (!file.isEmpty()) resourceInput->setText(file);
+    });
+    connect(addResourceBtn, &QPushButton::clicked, this, [resourceInput, resourceList, resources]() {
+        QString res = resourceInput->text().trimmed();
+        if (!res.isEmpty() && !resources->contains(res)) {
+            resources->append(res);
+            resourceList->addItem(res);
+            resourceInput->clear();
+        }
+    });
+    connect(resourceList, &QListWidget::itemDoubleClicked, this, [resourceList, resources](QListWidgetItem *item) {
+        resources->removeAll(item->text());
+        delete item;
             });
     
     addGoalButton = new QPushButton("Add Goal");
@@ -529,241 +523,64 @@ void MainWindow::createGoalsSection(QVBoxLayout *parentLayout)
     createGoalLayout->addRow("Category:", goalCategoryCombo);
     createGoalLayout->addRow("Recurrence:", recurrenceTypeCombo);
     createGoalLayout->addRow("Recurrence Details:", recurrenceValueInput);
-    
     QHBoxLayout *addEditButtonsLayout = new QHBoxLayout();
     addEditButtonsLayout->addWidget(addGoalButton);
     addEditButtonsLayout->addWidget(cancelEditButton);
     createGoalLayout->addRow(addEditButtonsLayout);
-
     parentLayout->addWidget(createGoalGroup);
 
-    // Current Goals List Section
+    // --- Current Goals Section (Card/List View, Grid) ---
     QGroupBox *currentGoalsGroup = new QGroupBox("Current Goals");
     QVBoxLayout *currentGoalsLayout = new QVBoxLayout(currentGoalsGroup);
 
-    goalsListWidget = new QListWidget();
-    deleteGoalButton = new QPushButton("Delete Goal");
-    startTrackingButton = new QPushButton("Start Tracking Goal");
-    stopTrackingButton = new QPushButton("Stop Tracking Goal");
-    stopTrackingButton->setEnabled(false);
+    QScrollArea *goalsScrollArea = new QScrollArea();
+    goalsScrollArea->setWidgetResizable(true);
+    goalsScrollArea->setMinimumHeight(400); 
+    goalsScrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    QWidget *goalsContainer = new QWidget();
+    goalsCardLayout = new QGridLayout(goalsContainer);
+    goalsCardLayout->setSpacing(16);
+    goalsCardLayout->setContentsMargins(8, 8, 8, 8);
 
-    QHBoxLayout *goalButtonsLayout = new QHBoxLayout();
-    goalButtonsLayout->addWidget(startTrackingButton);
-    goalButtonsLayout->addWidget(stopTrackingButton);
-    goalButtonsLayout->addWidget(deleteGoalButton);
-
-    currentGoalsLayout->addWidget(goalsListWidget);
-    currentGoalsLayout->addLayout(goalButtonsLayout);
+    goalsScrollArea->setWidget(goalsContainer);
+    currentGoalsLayout->addWidget(goalsScrollArea);
 
     parentLayout->addWidget(currentGoalsGroup);
 
-    // Resource Management Section
-    QGroupBox *resourceGroup = new QGroupBox("Resources");
-    QVBoxLayout *resourceLayout = new QVBoxLayout(resourceGroup);
-
-    // Add File
-    QPushButton *addFileButton = new QPushButton("Add File");
-    resourceLayout->addWidget(addFileButton);
-
-    // Add Link
-    QHBoxLayout *linkLayout = new QHBoxLayout();
-    QLineEdit *linkInput = new QLineEdit();
-    linkInput->setPlaceholderText("Paste link here...");
-    QPushButton *addLinkButton = new QPushButton("Add Link");
-    linkLayout->addWidget(linkInput);
-    linkLayout->addWidget(addLinkButton);
-    resourceLayout->addLayout(linkLayout);
-
-    // Add Note
-    QHBoxLayout *noteLayout = new QHBoxLayout();
-    QTextEdit *noteInput = new QTextEdit();
-    noteInput->setPlaceholderText("Add a note...");
-    noteInput->setMaximumHeight(50);
-    QPushButton *addNoteButton = new QPushButton("Add Note");
-    noteLayout->addWidget(noteInput);
-    noteLayout->addWidget(addNoteButton);
-    resourceLayout->addLayout(noteLayout);
-
-    // Resource List
-    QListWidget *resourceList = new QListWidget();
-    resourceLayout->addWidget(resourceList);
-
-    createGoalLayout->addRow(resourceGroup);
-
-    // Resource Management Logic
-    auto refreshResourceList = [this, resourceList]() {
-        resourceList->clear();
-        int goalId = m_currentSelectedGoalId;
-        if (goalId == -1) return;
-        QSqlQuery query(db);
-        query.prepare("SELECT id, type, value, description FROM goal_resources WHERE goal_id = ?");
-        query.addBindValue(goalId);
-        if (query.exec()) {
-            while (query.next()) {
-                QString type = query.value(1).toString();
-                QString value = query.value(2).toString();
-                QString desc = query.value(3).toString();
-                QString display = type.toUpper() + ": " + (desc.isEmpty() ? value : desc);
-                QListWidgetItem *item = new QListWidgetItem(display);
-                item->setData(Qt::UserRole, query.value(0).toInt());
-                item->setData(Qt::UserRole + 1, type);
-                item->setData(Qt::UserRole + 2, value);
-                resourceList->addItem(item);
-            }
-        }
-    };
-
-    connect(addFileButton, &QPushButton::clicked, this, [this, resourceList, refreshResourceList]() {
-        int goalId = m_currentSelectedGoalId;
-        if (goalId == -1) { QMessageBox::warning(this, "No Goal Selected", "Please select or create a goal first."); return; }
-        QString filePath = QFileDialog::getOpenFileName(this, "Select File to Attach");
-        if (!filePath.isEmpty()) {
-            QSqlQuery query(db);
-            query.prepare("INSERT INTO goal_resources (goal_id, type, value) VALUES (?, 'file', ?)");
-            query.addBindValue(goalId);
-            query.addBindValue(filePath);
-            query.exec();
-            refreshResourceList();
-        }
-    });
-    connect(addLinkButton, &QPushButton::clicked, this, [this, linkInput, resourceList, refreshResourceList]() {
-        int goalId = m_currentSelectedGoalId;
-        QString link = linkInput->text().trimmed();
-        if (goalId == -1 || link.isEmpty()) return;
-        QSqlQuery query(db);
-        query.prepare("INSERT INTO goal_resources (goal_id, type, value) VALUES (?, 'link', ?)");
-        query.addBindValue(goalId);
-        query.addBindValue(link);
-        query.exec();
-        linkInput->clear();
-        refreshResourceList();
-    });
-    connect(addNoteButton, &QPushButton::clicked, this, [this, noteInput, resourceList, refreshResourceList]() {
-        int goalId = m_currentSelectedGoalId;
-        QString note = noteInput->toPlainText().trimmed();
-        if (goalId == -1 || note.isEmpty()) return;
-        QSqlQuery query(db);
-        query.prepare("INSERT INTO goal_resources (goal_id, type, value) VALUES (?, 'note', ?)");
-        query.addBindValue(goalId);
-        query.addBindValue(note);
-        query.exec();
-        noteInput->clear();
-        refreshResourceList();
-    });
-    connect(resourceList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
-        QString type = item->data(Qt::UserRole + 1).toString();
-        QString value = item->data(Qt::UserRole + 2).toString();
-        if (type == "file" || type == "link") {
-            QDesktopServices::openUrl(QUrl::fromLocalFile(value));
-        } else if (type == "note") {
-            QMessageBox::information(this, "Note", value);
-        }
-    });
-
-    // Refresh resource list when a goal is selected
-    connect(goalsListWidget, &QListWidget::itemSelectionChanged, this, [refreshResourceList]() {
-        refreshResourceList();
-    });
-
-    // Connect buttons to slots
-    connect(addGoalButton, &QPushButton::clicked, this, [this, addFileButton, addLinkButton, addNoteButton]() {
+   
+    // --- Goal Add/Update Logic ---
+    connect(addGoalButton, &QPushButton::clicked, this, [this, resources]() {
         QString subject = goalSubjectInput->text();
         int targetMinutes = goalTargetMinutesInput->value();
         QString notes = goalNotesInput->toPlainText();
         QString recurrenceType = recurrenceTypeCombo->currentText();
         QString recurrenceValue = recurrenceValueInput->text();
         QString category = goalCategoryCombo->currentText();
-
+        QStringList resourceList = *resources;
         if (subject.isEmpty() || targetMinutes <= 0) {
             QMessageBox::warning(this, "Input Error", "Subject and Target Minutes cannot be empty.");
             return;
         }
-
         if (m_currentSelectedGoalId != -1) {
-            // Update existing goal
-            if (studyGoal->updateGoal(m_currentSelectedGoalId, subject, targetMinutes, notes, recurrenceType, recurrenceValue, category)) {
+            if (studyGoal->updateGoal(m_currentSelectedGoalId, subject, targetMinutes, notes, recurrenceType, recurrenceValue, category, resourceList)) {
                 QMessageBox::information(this, "Success", "Goal updated successfully!");
                 handleCancelEdit();
             } else {
                 QMessageBox::critical(this, "Error", "Failed to update goal.");
             }
         } else {
-            // Create new goal
-            if (studyGoal->createGoal(subject, targetMinutes, notes, recurrenceType, recurrenceValue, category)) {
+            if (studyGoal->createGoal(subject, targetMinutes, notes, recurrenceType, recurrenceValue, category, resourceList)) {
                 QMessageBox::information(this, "Success", "Goal created successfully!");
                 refreshGoalsDisplay();
-
-                if (this->goalsListWidget->count() > 0) {
-                    QListWidgetItem *lastItem = this->goalsListWidget->item(this->goalsListWidget->count() - 1);
-                    this->goalsListWidget->setCurrentItem(lastItem);
-                }
-
             } else {
                 QMessageBox::critical(this, "Error", "Failed to create goal.");
             }
         }
     });
     
-    connect(deleteGoalButton, &QPushButton::clicked, this, &MainWindow::handleDeleteGoal);
-    connect(startTrackingButton, &QPushButton::clicked, this, &MainWindow::handleStartGoalTracking);
-    connect(stopTrackingButton, &QPushButton::clicked, this, &MainWindow::handleStopGoalTracking);
     connect(cancelEditButton, &QPushButton::clicked, this, &MainWindow::handleCancelEdit);
 
-    // Connect list selection to fill input fields and enable/disable tracking buttons
-    connect(goalsListWidget, &QListWidget::itemSelectionChanged, this, [this]() {
-        if (goalsListWidget->currentItem()) {
-            m_currentSelectedGoalId = goalsListWidget->currentItem()->data(Qt::UserRole).toInt();
-            QMap<QString, QVariant> details = studyGoal->getGoalDetails(m_currentSelectedGoalId);
-            goalSubjectInput->setText(details["subject"].toString());
-            goalTargetMinutesInput->setValue(details["target_minutes"].toInt());
-            goalNotesInput->setText(details["notes"].toString());
-            
-            int recurrenceIndex = recurrenceTypeCombo->findText(details["recurrence_type"].toString());
-            if (recurrenceIndex != -1) {
-                recurrenceTypeCombo->setCurrentIndex(recurrenceIndex);
-            }
-            recurrenceValueInput->setText(details["recurrence_value"].toString());
-
-            int categoryIndex = goalCategoryCombo->findText(details["category"].toString());
-            if (categoryIndex != -1) {
-                goalCategoryCombo->setCurrentIndex(categoryIndex);
-            }
-
-            addGoalButton->setText("Update Goal");
-            cancelEditButton->setEnabled(true);
-            startTrackingButton->setEnabled(true);
-        } else {
-            handleCancelEdit();
-        }
-    });
-
-
     refreshGoalsDisplay();
-
-    resourceList->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(resourceList, &QListWidget::customContextMenuRequested, this, [this, resourceList, refreshResourceList](const QPoint &pos) {
-        QListWidgetItem *item = resourceList->itemAt(pos);
-        if (!item) return;
-        QMenu menu;
-        QAction *deleteAction = menu.addAction("Delete Resource");
-        QAction *selectedAction = menu.exec(resourceList->viewport()->mapToGlobal(pos));
-        if (selectedAction == deleteAction) {
-            int resourceId = item->data(Qt::UserRole).toInt();
-            QSqlQuery query(db);
-            query.prepare("DELETE FROM goal_resources WHERE id = ?");
-            query.addBindValue(resourceId);
-            query.exec();
-            refreshResourceList();
-        }
-    });
-
-    connect(goalsListWidget, &QListWidget::itemSelectionChanged, this, [this, addFileButton, addLinkButton, addNoteButton, refreshResourceList]() {
-        bool hasSelection = goalsListWidget->currentItem() != nullptr && goalsListWidget->currentItem()->data(Qt::UserRole).isValid();
-        addFileButton->setEnabled(hasSelection);
-        addLinkButton->setEnabled(hasSelection);
-        addNoteButton->setEnabled(hasSelection);
-        refreshResourceList();
-    });
 }
 
 void MainWindow::createAnalyticsTab()
@@ -795,32 +612,30 @@ void MainWindow::createAnalyticsTab()
     QChartView *focusChartView = new QChartView(analytics->createFocusChart(startDateEdit->date(), endDateEdit->date()));
     focusChartView->setMinimumSize(500, 250);
     focusChartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    focusChartView->setToolTip("Shows your average focus score per day.");
     QChartView *productivityChartView = new QChartView(analytics->createProductivityChart(startDateEdit->date(), endDateEdit->date()));
     productivityChartView->setMinimumSize(500, 250);
     productivityChartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    QChartView *effectivenessChartView = new QChartView(analytics->createEffectivenessChart(startDateEdit->date(), endDateEdit->date()));
-    effectivenessChartView->setMinimumSize(500, 250);
-    effectivenessChartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    QChartView *distractionChartView = new QChartView(analytics->createDistractionChart(startDateEdit->date(), endDateEdit->date()));
-    distractionChartView->setMinimumSize(500, 250);
-    distractionChartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    QChartView *subjectChartView = new QChartView(analytics->createSubjectDistributionChart(startDateEdit->date(), endDateEdit->date()));
-    subjectChartView->setMinimumSize(500, 250);
-    subjectChartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    productivityChartView->setToolTip("Shows the number of study detections (activity) per day.");
     QChartView *goalChartView = new QChartView(analytics->createGoalCompletionChart(startDateEdit->date(), endDateEdit->date()));
     goalChartView->setMinimumSize(500, 250);
     goalChartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    QChartView *streakChartView = new QChartView(analytics->createStreakChart(startDateEdit->date(), endDateEdit->date()));
-    streakChartView->setMinimumSize(500, 250);
-    streakChartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    goalChartView->setToolTip("Shows the percentage of goals completed vs. incomplete.");
+    QChartView *subjectTimeChartView = new QChartView(analytics->createSubjectTimeChart(startDateEdit->date(), endDateEdit->date()));
+    subjectTimeChartView->setMinimumSize(500, 250);
+    subjectTimeChartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    subjectTimeChartView->setToolTip("Shows how much time you spent on each subject.");
+    QChartView *distractionBarChartView = new QChartView(analytics->createDistractionBarChart(startDateEdit->date(), endDateEdit->date()));
+    distractionBarChartView->setMinimumSize(500, 250);
+    distractionBarChartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    distractionBarChartView->setToolTip("Shows which distractions you reported most often in surveys.");
     chartsLayout->addWidget(focusChartView);
     chartsLayout->addWidget(productivityChartView);
-    chartsLayout->addWidget(effectivenessChartView);
-    chartsLayout->addWidget(distractionChartView);
-    chartsLayout->addWidget(subjectChartView);
     chartsLayout->addWidget(goalChartView);
-    chartsLayout->addWidget(streakChartView);
+    chartsLayout->addWidget(subjectTimeChartView);
+    chartsLayout->addWidget(distractionBarChartView);
     analyticsLayout->addLayout(chartsLayout);
+    analyticsTab->setToolTip("Explore your study patterns, focus, and progress here.");
 
     // Add insights section
     QTextEdit *insightsText = new QTextEdit();
@@ -842,11 +657,9 @@ void MainWindow::createAnalyticsTab()
     auto updateAllCharts = [=]() {
         focusChartView->setChart(analytics->createFocusChart(startDateEdit->date(), endDateEdit->date()));
         productivityChartView->setChart(analytics->createProductivityChart(startDateEdit->date(), endDateEdit->date()));
-        effectivenessChartView->setChart(analytics->createEffectivenessChart(startDateEdit->date(), endDateEdit->date()));
-        distractionChartView->setChart(analytics->createDistractionChart(startDateEdit->date(), endDateEdit->date()));
-        subjectChartView->setChart(analytics->createSubjectDistributionChart(startDateEdit->date(), endDateEdit->date()));
         goalChartView->setChart(analytics->createGoalCompletionChart(startDateEdit->date(), endDateEdit->date()));
-        streakChartView->setChart(analytics->createStreakChart(startDateEdit->date(), endDateEdit->date()));
+        subjectTimeChartView->setChart(analytics->createSubjectTimeChart(startDateEdit->date(), endDateEdit->date()));
+        distractionBarChartView->setChart(analytics->createDistractionBarChart(startDateEdit->date(), endDateEdit->date()));
         insightsText->clear();
         analytics->analyzePatterns(startDateEdit->date(), endDateEdit->date());
     };
@@ -871,20 +684,110 @@ void MainWindow::createSettingsTab()
     // Alert settings
     QGroupBox *alertGroup = new QGroupBox("Alert Settings");
     QVBoxLayout *alertLayout = new QVBoxLayout(alertGroup);
-    
     QCheckBox *enableAlertsCheckbox = new QCheckBox("Enable Focus Alerts");
     enableAlertsCheckbox->setChecked(alertsEnabled);
-    
+    QSpinBox *alertThresholdSpin = new QSpinBox();
+    alertThresholdSpin->setRange(1, 60);
+    alertThresholdSpin->setValue(alertThreshold);
     alertLayout->addWidget(enableAlertsCheckbox);
+    alertLayout->addWidget(new QLabel("Alert Threshold (seconds):"));
+    alertLayout->addWidget(alertThresholdSpin);
     layout->addWidget(alertGroup);
-
-    // Connect signals
     connect(enableAlertsCheckbox, &QCheckBox::toggled, [this](bool checked) {
         alertsEnabled = checked;
         saveSettings();
     });
+    connect(alertThresholdSpin, QOverload<int>::of(&QSpinBox::valueChanged), [this](int v){
+        alertThreshold = v;
+        saveSettings();
+    });
 
+    // Pomodoro settings
+    QGroupBox *pomodoroGroup = new QGroupBox("Pomodoro Timer Settings");
+    QFormLayout *pomodoroLayout = new QFormLayout(pomodoroGroup);
+    QSpinBox *studyDurationSpin = new QSpinBox();
+    studyDurationSpin->setRange(10, 120);
+    shortBreakSpin = new QSpinBox();
+    shortBreakSpin->setRange(1, 30);
+    longBreakSpin = new QSpinBox();
+    longBreakSpin->setRange(5, 60);
+    cyclesSpin = new QSpinBox();
+    cyclesSpin->setRange(1, 10);
+    minStudySpin = new QSpinBox();
+    minStudySpin->setRange(1, 180);
+    pomodoroLayout->addRow("Study Duration (min):", studyDurationSpin);
+    pomodoroLayout->addRow("Short Break (min):", shortBreakSpin);
+    pomodoroLayout->addRow("Long Break (min):", longBreakSpin);
+    pomodoroLayout->addRow("Cycles Before Long Break:", cyclesSpin);
+    layout->addWidget(pomodoroGroup);
+    connect(studyDurationSpin, QOverload<int>::of(&QSpinBox::valueChanged), [this](int v){ pomodoroTimer->setStudyDuration(v); saveSettings(); });
+    connect(shortBreakSpin, QOverload<int>::of(&QSpinBox::valueChanged), [this](int v){ pomodoroTimer->setBreakDuration(v); saveSettings(); });
+    connect(longBreakSpin, QOverload<int>::of(&QSpinBox::valueChanged), [this](int v){ pomodoroTimer->setLongBreakDuration(v); saveSettings(); });
+    connect(cyclesSpin, QOverload<int>::of(&QSpinBox::valueChanged), [this](int v){ pomodoroTimer->setCyclesBeforeLongBreak(v); saveSettings(); });
+
+    // Minimum minutes for study day
+    QGroupBox *streakGroup = new QGroupBox("Streak/Yearly Activity");
+    QFormLayout *streakLayout = new QFormLayout(streakGroup);
+    QSpinBox *minStudySpin = new QSpinBox();
+    minStudySpin->setRange(1, 180); minStudySpin->setValue(1);
+    streakLayout->addRow("Minimum minutes to count as study day:", minStudySpin);
+    layout->addWidget(streakGroup);
+    connect(minStudySpin, QOverload<int>::of(&QSpinBox::valueChanged), [this](int v){
+        // You would use this value in your streak/yearly activity logic
+        saveSettings();
+    });
+
+    layout->addStretch();
     tabWidget->addTab(settingsTab, "Settings");
+
+    // Notification settings
+    QGroupBox *notifGroup = new QGroupBox("Notification Settings");
+    QVBoxLayout *notifLayout = new QVBoxLayout(notifGroup);
+    enableDesktopNotif = new QCheckBox("Enable desktop notifications");
+    notifPomodoro = new QCheckBox("Notify on Pomodoro completion");
+    notifAchievement = new QCheckBox("Notify on achievement unlock");
+    notifStreak = new QCheckBox("Notify on streak milestone");
+    notifSessionReminder = new QCheckBox("Notify before session starts");
+    enableDesktopNotif->setChecked(true);
+    notifPomodoro->setChecked(true);
+    notifAchievement->setChecked(true);
+    notifStreak->setChecked(true);
+    notifSessionReminder->setChecked(false);
+    notifLayout->addWidget(enableDesktopNotif);
+    notifLayout->addWidget(notifPomodoro);
+    notifLayout->addWidget(notifAchievement);
+    notifLayout->addWidget(notifStreak);
+    notifLayout->addWidget(notifSessionReminder);
+    layout->addWidget(notifGroup);
+    connect(enableDesktopNotif, &QCheckBox::toggled, [this](bool){ saveSettings(); });
+    connect(notifPomodoro, &QCheckBox::toggled, [this](bool){ saveSettings(); });
+    connect(notifAchievement, &QCheckBox::toggled, [this](bool){ saveSettings(); });
+    connect(notifStreak, &QCheckBox::toggled, [this](bool){ saveSettings(); });
+    connect(notifSessionReminder, &QCheckBox::toggled, [this](bool){ saveSettings(); });
+
+    QSettings settings("StudyBuddy", "FocusMonitor");
+    studyDurationSpin->setValue(settings.value("pomodoroStudyDuration", 25).toInt());
+    shortBreakSpin->setValue(settings.value("pomodoroShortBreak", 5).toInt());
+    longBreakSpin->setValue(settings.value("pomodoroLongBreak", 15).toInt());
+    cyclesSpin->setValue(settings.value("pomodoroCycles", 4).toInt());
+    minStudySpin->setValue(settings.value("minStudyMinutes", 1).toInt());
+
+    // At the end of createSettingsTab()
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+    QPushButton *saveBtn = new QPushButton("Save");
+    QPushButton *cancelBtn = new QPushButton("Cancel");
+    buttonLayout->addStretch();
+    buttonLayout->addWidget(saveBtn);
+    buttonLayout->addWidget(cancelBtn);
+    layout->addLayout(buttonLayout);
+
+    connect(saveBtn, &QPushButton::clicked, this, [this]() {
+        saveSettings();
+        QMessageBox::information(this, "Settings", "Settings saved!");
+    });
+    connect(cancelBtn, &QPushButton::clicked, this, [this]() {
+        loadSettings();
+    });
 }
 
 void MainWindow::createAchievementsTab()
@@ -1055,6 +958,7 @@ bool MainWindow::loadFaceClassifier()
 
 void MainWindow::startWebcam()
 {
+    qDebug() << "startWebcam: called";
     // Goal selection dialog before starting webcam session
     QList<int> selectedGoalIds;
     QDialog goalDialog(this);
@@ -1066,8 +970,14 @@ void MainWindow::startWebcam()
     goalList->setSelectionMode(QAbstractItemView::MultiSelection);
     QList<GoalInfo> allGoals = studyGoal->getGoalsForDate(QDate::currentDate());
     for (const auto &goal : allGoals) {
+        int completed = goal.completedMinutes;
+        int target = goal.targetMinutes > 0 ? goal.targetMinutes : 1;
         QListWidgetItem *item = new QListWidgetItem(goal.subject + " (" + goal.category + ")");
         item->setData(Qt::UserRole, goal.id);
+        if (target > 0 && completed >= target) {
+            item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+            item->setText(item->text() + " [Completed]");
+        }
         goalList->addItem(item);
     }
     goalLayout->addWidget(goalList);
@@ -1076,6 +986,7 @@ void MainWindow::startWebcam()
     connect(goalBox, &QDialogButtonBox::accepted, &goalDialog, &QDialog::accept);
     connect(goalBox, &QDialogButtonBox::rejected, &goalDialog, &QDialog::reject);
     if (goalDialog.exec() != QDialog::Accepted) {
+        qDebug() << "startWebcam: goal dialog cancelled";
         return;
     }
     for (QListWidgetItem *item : goalList->selectedItems()) {
@@ -1085,12 +996,15 @@ void MainWindow::startWebcam()
 
     if (!capture.open(0)) {
         QMessageBox::critical(this, "Error", "Could not open the webcam!");
+        qDebug() << "startWebcam: failed to open webcam";
         return;
     }
+    qDebug() << "startWebcam: webcam opened";
 
     // Create a new study session record for this webcam session
-    int sessionId = studySession->createSession(-1, "webcam", "Webcam session started");
-    studySession->setCurrentSessionId(sessionId);
+    int sessionId = studySession ? studySession->createSession(-1, "webcam", "Webcam session started") : -1;
+    if (studySession) studySession->setCurrentSessionId(sessionId);
+    qDebug() << "startWebcam: sessionId=" << sessionId;
 
     // Link selected goals to this session
     for (int goalId : selectedGoalIds) {
@@ -1112,13 +1026,27 @@ void MainWindow::startWebcam()
     clearCharts();
 
     webcamActive = true;
+    if (timer) {
     timer->start(33);
-    startButton->setEnabled(false);
-    stopButton->setEnabled(true);
+        qDebug() << "startWebcam: timer started";
+    } else {
+        qDebug() << "startWebcam: timer is null!";
+    }
+    if (startButton) startButton->setEnabled(false);
+    else qDebug() << "startWebcam: startButton is null!";
+    if (stopButton) stopButton->setEnabled(true);
+    else qDebug() << "startWebcam: stopButton is null!";
+    qDebug() << "startWebcam: finished";
 }
 
 void MainWindow::stopWebcam()
 {
+    if (!db.isOpen()) {
+        if (!db.open()) {
+            qDebug() << "Failed to reopen database in stopWebcam:" << db.lastError().text();
+            return;
+        }
+    }
     timer->stop();
     capture.release();
     webcamActive = false;
@@ -1168,6 +1096,7 @@ void MainWindow::stopWebcam()
         if (linkQuery.exec()) {
             while (linkQuery.next()) {
                 int goalId = linkQuery.value(0).toInt();
+                qDebug() << "Adding progress to goal" << goalId << "for duration" << durationMinutes << "minutes (camera session)";
                 studyGoal->addProgress(goalId, durationMinutes);
             }
         }
@@ -1177,11 +1106,22 @@ void MainWindow::stopWebcam()
 
 void MainWindow::updateFrame()
 {
+    if (!db.isOpen()) {
+        if (!db.open()) {
+            qDebug() << "Failed to reopen database in updateFrame:" << db.lastError().text();
+            return;
+        }
+    }
+    qDebug() << "updateFrame: called";
+    if (!capture.isOpened()) {
+        qDebug() << "updateFrame: capture not opened";
+        return;
+    }
     capture.read(frame);
-
     if (frame.empty()) {
         QMessageBox::warning(this, "Warning", "Empty frame received from webcam!");
         stopWebcam();
+        qDebug() << "updateFrame: empty frame";
         return;
     }
 
@@ -1195,9 +1135,12 @@ void MainWindow::updateFrame()
     // Update blink count label after processing the frame
     if (blinkCountLabel) {
         blinkCountLabel->setText(QString("Blinks: %1").arg(blinkCount));
+    } else {
+        qDebug() << "updateFrame: blinkCountLabel is null!";
     }
 
     displayImage(frame);
+    qDebug() << "updateFrame: finished";
 }
 
 void MainWindow::detectAndDisplayFaces(cv::Mat &frame)
@@ -1316,12 +1259,12 @@ void MainWindow::displayImage(const cv::Mat &frame)
 
 void MainWindow::logFaceDetection(int faceCount, bool eyesDetected, float focusScore)
 {
-    if (!QSqlDatabase::database().isOpen()) {
+    if (!db.isOpen()) {
         qDebug() << "Error: Database is not open when trying to log detection";
         return;
     }
 
-    QSqlQuery query;
+    QSqlQuery query(db);
     QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
 
     // Updated query
@@ -1351,9 +1294,9 @@ void MainWindow::logFaceDetection(int faceCount, bool eyesDetected, float focusS
 
 void MainWindow::showDetectionHistory()
 {
-    QSqlQuery query;
+    QSqlQuery query(db);
 
-    if (!QSqlDatabase::database().isOpen()) {
+    if (!db.isOpen()) {
         QMessageBox::critical(this, "Database Error", "Database is not open!");
         return;
     }
@@ -1369,7 +1312,7 @@ void MainWindow::showDetectionHistory()
     int recordCount = 0;
 
     // Get statistics
-    QSqlQuery statsQuery;
+    QSqlQuery statsQuery(db);
     if (statsQuery.exec("SELECT AVG(focus_score) as avg_focus, AVG(blink_count) as avg_blinks FROM detections")) {
         if (statsQuery.next()) {
             double avgFocus = statsQuery.value(0).toDouble() * 100;
@@ -1388,7 +1331,6 @@ void MainWindow::showDetectionHistory()
         bool eyesDetected = query.value(2).toBool();
         int blinkCount = query.value(3).toInt();
         float focusScore = query.value(4).toFloat() * 100;
-
 
         QString focusBar;
         int barLength = static_cast<int>(focusScore / 5);
@@ -1419,11 +1361,23 @@ void MainWindow::showDetectionHistory()
         history = "No detection records found in the database.";
     }
 
-    QMessageBox msgBox;
-    msgBox.setWindowTitle("Detection History");
-    msgBox.setText(history);
-    msgBox.setStyleSheet("QMessageBox { min-width: 450px; } QLabel { font-family: 'Courier New', monospace; }");
-    msgBox.exec();
+    // Use a QDialog with QTextEdit for scrollable history
+    QDialog dialog(this);
+    dialog.setWindowTitle("Detection History");
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+
+    QTextEdit *textEdit = new QTextEdit();
+    textEdit->setReadOnly(true);
+    textEdit->setFont(QFont("Courier New", 10));
+    textEdit->setText(history);
+    layout->addWidget(textEdit);
+
+    QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Close);
+    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttonBox);
+
+    dialog.resize(600, 600);
+    dialog.exec();
 }
 
 void MainWindow::loadSettings()
@@ -1761,7 +1715,7 @@ void MainWindow::updateChartData()
 void MainWindow::clearCharts()
 {
     if (!focusSeries || !blinkSeries) {
-        qDebug() << "Chart series not initialized";
+        qDebug() << "clearCharts: Chart series not initialized";
         return;
     }
 
@@ -1769,15 +1723,18 @@ void MainWindow::clearCharts()
         focusSeries->clear();
         blinkSeries->clear();
         sessionTimer.restart();
-        
         // Reset axes
         if (timeAxis) timeAxis->setRange(0, 1);
+        else qDebug() << "clearCharts: timeAxis is null!";
         if (focusAxis) focusAxis->setRange(0, 100);
+        else qDebug() << "clearCharts: focusAxis is null!";
         if (blinkAxis) blinkAxis->setRange(0, 30);
-
+        else qDebug() << "clearCharts: blinkAxis is null!";
         // Force update
         if (focusChartView) focusChartView->update();
+        else qDebug() << "clearCharts: focusChartView is null!";
         if (blinkChartView) blinkChartView->update();
+        else qDebug() << "clearCharts: blinkChartView is null!";
     }
     catch (const std::exception& e) {
         qDebug() << "Error clearing charts:" << e.what();
@@ -1789,6 +1746,20 @@ void MainWindow::updatePomodoroDisplay(const QString &time)
 {
     if (pomodoroTimeLabel) {
         pomodoroTimeLabel->setText(time);
+    }
+    // Real-time update of active goal progress bar
+    if (m_activeGoalProgressBar && m_currentActiveGoalId != -1) {
+        // Do NOT increment m_currentSessionProgress here. Only use the value set by onGoalSessionTimeUpdated.
+        int completed = studyGoal->getProgress(m_currentActiveGoalId);
+        int target = studyGoal->getTarget(m_currentActiveGoalId);
+        if (target <= 0) target = 1;
+        int elapsedSeconds = m_currentSessionProgress.value(m_currentActiveGoalId, 0);
+        int elapsedMinutes = elapsedSeconds / 60;
+        int total = completed + elapsedMinutes;
+        float percent = (target > 0) ? (float)total / target * 100.0f : 0.0f;
+        m_activeGoalProgressBar->setRange(0, target);
+        m_activeGoalProgressBar->setValue(total);
+        m_activeGoalProgressBar->setFormat(QString("%1/%2 minutes (%3%)").arg(total).arg(target).arg(percent, 0, 'f', 1));
     }
 }
 
@@ -1811,6 +1782,11 @@ void MainWindow::handlePomodoroTimerCompleted()
     // Emit Pomodoro completed signal for achievement tracking
     achievementTracker->pomodoroCompleted();
 
+    // Desktop notification for Pomodoro completion
+    if (trayIcon && QSystemTrayIcon::supportsMessages() && enableDesktopNotif->isChecked() && notifPomodoro->isChecked()) {
+        trayIcon->showMessage(tr("Pomodoro Complete"), tr("Great job! Take a break."), QSystemTrayIcon::Information, 3000);
+    }
+
     // You can add a sound effect or a message box here
     QMessageBox::information(this, "Pomodoro", "Timer completed!");
 }
@@ -1819,93 +1795,160 @@ void MainWindow::handleAddGoal()
 {
 }
 
-void MainWindow::handleDeleteGoal()
-{
-    QListWidgetItem *selectedItem = goalsListWidget->currentItem();
-    if (!selectedItem) {
-        QMessageBox::warning(this, "Selection Error", "Please select a goal to delete.");
-        return;
-    }
-
-    int goalId = selectedItem->data(Qt::UserRole).toInt();
-
-    if (QMessageBox::question(this, "Confirm Deletion", "Are you sure you want to delete this goal?", QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
-        if (studyGoal->deleteGoal(goalId)) {
-            QMessageBox::information(this, "Success", "Goal deleted successfully!");
-        } else {
-            QMessageBox::critical(this, "Error", "Failed to delete goal.");
-        }
-    }
-}
-
-void MainWindow::handleStartGoalTracking()
-{
-    QListWidgetItem *selectedItem = goalsListWidget->currentItem();
-    if (!selectedItem) {
-        QMessageBox::warning(this, "Selection Error", "Please select a goal to start tracking.");
-        return;
-    }
-    int goalId = selectedItem->data(Qt::UserRole).toInt();
-    int initialElapsedSeconds = m_currentSessionProgress.value(goalId, 0);
-    studyGoal->startTrackingGoal(goalId, initialElapsedSeconds);
-    pomodoroTimer->start();
-}
-
-void MainWindow::handleStopGoalTracking()
-{
-    pomodoroTimer->pause();
-    startTrackingButton->setEnabled(true);
-    stopTrackingButton->setEnabled(false);
-}
-
 void MainWindow::refreshGoalsDisplay()
 {
-    goalsListWidget->clear();
+    // Clear old cards
+    QLayoutItem *child;
+    while ((child = goalsCardLayout->takeAt(0)) != nullptr) {
+        if (child->widget()) child->widget()->deleteLater();
+        delete child;
+    }
+
+    m_activeGoalProgressBar = nullptr; // Reset before rebuilding
     QList<GoalInfo> goals = studyGoal->getGoalsForDate(QDate::currentDate());
+    for (const auto& goal : goals) {
+        qDebug() << "Goal" << goal.id << "completed:" << goal.completedMinutes << "target:" << goal.targetMinutes;
+    }
 
     if (goals.isEmpty()) {
-        goalsListWidget->addItem("No goals for today.");
+        QLabel *emptyLabel = new QLabel("No goals yet! Create your first goal above.");
+        emptyLabel->setAlignment(Qt::AlignCenter);
+        emptyLabel->setStyleSheet("color: #aaa; font-style: italic;");
+        goalsCardLayout->addWidget(emptyLabel, 0, 0);
         return;
     }
 
+    int colCount = 3; // Number of cards per row
+    int row = 0, col = 0;
     for (const auto &goal : goals) {
-        int completedMinutes = goal.completedMinutes;
-        int targetMinutes = goal.targetMinutes;
-        float completionPercentage = studyGoal->getCompletionPercentage(goal.id);
-        QString recurrenceType = goal.recurrenceType;
-        QString recurrenceValue = goal.recurrenceValue;
+        QWidget *card = new QWidget();
+        QVBoxLayout *cardLayout = new QVBoxLayout(card);
 
-
-        if (goal.id == m_currentActiveGoalId && m_currentSessionProgress.contains(goal.id)) {
-            completedMinutes += (m_currentSessionProgress.value(goal.id) / 60);
-            if (targetMinutes > 0) {
-                completionPercentage = (float)completedMinutes / targetMinutes * 100.0f;
+        // --- Resource emoji row ---
+        QHBoxLayout *resourceEmojiLayout = new QHBoxLayout();
+        resourceEmojiLayout->addStretch();
+        if (!goal.resources.isEmpty()) {
+            QPushButton *resourceBtn = new QPushButton();
+            resourceBtn->setFlat(true);
+            resourceBtn->setCursor(Qt::PointingHandCursor);
+            resourceBtn->setStyleSheet("QPushButton { background: transparent; font-size: 20px; } QPushButton:hover { color: #C3073F; }");
+            // Show only one emoji: 📎 if any file, otherwise 🔗 if any link
+            bool hasFile = false, hasLink = false;
+            for (const QString &res : goal.resources) {
+                if (res.startsWith("http")) hasLink = true;
+                else hasFile = true;
             }
+            QString emoji;
+            if (hasFile) emoji = "📎";
+            else emoji = "🔗";
+            resourceBtn->setText(emoji);
+            resourceEmojiLayout->addWidget(resourceBtn, 0, Qt::AlignRight);
+            // Popup menu on click
+            connect(resourceBtn, &QPushButton::clicked, this, [this, goal, resourceBtn]() {
+                QMenu *menu = new QMenu(resourceBtn);
+                for (const QString &res : goal.resources) {
+                    QAction *act = new QAction(res, menu);
+                    connect(act, &QAction::triggered, this, [this, res]() {
+                        openResourceInApp(res);
+                    });
+                    menu->addAction(act);
+                }
+                menu->exec(QCursor::pos());
+            });
+        }
+        cardLayout->addLayout(resourceEmojiLayout);
+
+        // Title, category, and recurrence (all in one line)
+        QString titleText = QString("%1 (%2)").arg(goal.subject, goal.category);
+        if (goal.recurrenceType != "None") {
+            titleText += QString("  <span style='background:#6F2232; color:#fff; border-radius:4px; padding:2px 6px; font-size:12px;'>[%1: %2]</span>")
+                .arg(goal.recurrenceType, goal.recurrenceValue);
+        }
+        QLabel *title = new QLabel(titleText);
+        title->setStyleSheet("font-weight: bold; font-size: 16px;");
+        title->setTextFormat(Qt::RichText);
+        cardLayout->addWidget(title);
+
+        // Progress bar
+        int completed = goal.completedMinutes;
+        int target = goal.targetMinutes > 0 ? goal.targetMinutes : 1; // Prevent zero range
+        float percent = (target > 0) ? (float)completed / target * 100.0f : 0.0f;
+        QProgressBar *progress = new QProgressBar();
+        progress->setObjectName("goalProgressBar");
+        progress->setRange(0, target);
+        progress->setValue(completed);
+        progress->setFormat(QString("%1/%2 minutes (%3%)").arg(completed).arg(target).arg(percent, 0, 'f', 1));
+        progress->setStyleSheet("QProgressBar::chunk { background-color: #C3073F; min-width: 2px; }"); // Always visible
+        cardLayout->addWidget(progress);
+        if (goal.id == m_currentActiveGoalId) {
+            m_activeGoalProgressBar = progress;
         }
 
-        // Build the display string with recurrence information
-        QString display = QString("%1 (%2): %3/%4 minutes (%5%)")
-                              .arg(goal.subject)
-                              .arg(goal.category)
-                              .arg(completedMinutes)
-                              .arg(targetMinutes)
-                              .arg(completionPercentage, 0, 'f', 1);
-        
-        // Add recurrence information if it's a recurring goal
-        if (recurrenceType != "None") {
-            display += QString(" [%1").arg(recurrenceType);
-            if (!recurrenceValue.isEmpty()) {
-                display += QString(": %1").arg(recurrenceValue);
-            }
-            display += "]";
-        }
+        // Inline actions
+        QHBoxLayout *actions = new QHBoxLayout();
+        QPushButton *startBtn = new QPushButton("Start");
+        startBtn->setToolTip("Start Tracking");
+        QPushButton *stopBtn = new QPushButton("Stop");
+        stopBtn->setToolTip("Stop Tracking");
+        QPushButton *deleteBtn = new QPushButton("Delete");
+        deleteBtn->setToolTip("Delete Goal");
+        actions->addWidget(startBtn);
+        actions->addWidget(stopBtn);
+        actions->addWidget(deleteBtn);
+        QString btnStyle = "QPushButton { background-color: #6F2232; color: white; border: none; padding: 5px 10px; border-radius: 3px;width: 100px; } QPushButton:hover { background-color: #950740; }";
+        startBtn->setStyleSheet(btnStyle);
+        stopBtn->setStyleSheet(btnStyle);
+        deleteBtn->setStyleSheet(btnStyle);
+        actions->addStretch();
+        cardLayout->addLayout(actions);
 
-        QListWidgetItem *item = new QListWidgetItem(display);
-        item->setData(Qt::UserRole, goal.id);
-        goalsListWidget->addItem(item);
+        connect(startBtn, &QPushButton::clicked, this, [this, goal]() {
+            if (!pomodoroTimer || !studyGoal) {
+                qDebug() << "Error: pomodoroTimer or studyGoal is null!";
+                return;
+            }
+            // Prevent tracking if goal is already completed
+            int completed = studyGoal->getProgress(goal.id);
+            int target = studyGoal->getTarget(goal.id);
+            if (target > 0 && completed >= target) {
+                QMessageBox::warning(this, "Goal Already Completed", "You cannot track a goal that is already completed.");
+                return;
+            }
+            // Clear session progress for all other goals
+            m_currentSessionProgress.clear();
+            m_currentActiveGoalId = goal.id;
+            int initialElapsedSeconds = 0;
+            studyGoal->startTrackingGoal(goal.id, initialElapsedSeconds);
+            pomodoroTimer->start();
+        });
+        connect(stopBtn, &QPushButton::clicked, this, [this]() {
+            if (!pomodoroTimer || !studyGoal) {
+                qDebug() << "Error: pomodoroTimer or studyGoal is null!";
+                return;
+            }
+            qDebug() << "Stop button clicked";
+            pomodoroTimer->pause();
+            studyGoal->stopTrackingGoal();
+        });
+        connect(deleteBtn, &QPushButton::clicked, this, [this, goal, card]() {
+            if (QMessageBox::question(this, "Confirm Deletion", "Are you sure you want to delete this goal?", QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+                studyGoal->deleteGoal(goal.id);
+                card->deleteLater();
+            }
+        });
+
+        card->setStyleSheet("background: #222; border: 1px solid #6F2232; border-radius: 8px; padding: 10px;");
+        card->setFixedHeight(360);
+        goalsCardLayout->addWidget(card, row, col);
+        col++;
+        if (col >= colCount) { col = 0; row++; }
+
+        // --- Enable editing on card click ---
+        card->setCursor(Qt::PointingHandCursor);
+        card->installEventFilter(this);
+        card->setProperty("goalId", goal.id);
     }
 }
-
 void MainWindow::handleGoalCreated(int goalId)
 {
     refreshGoalsDisplay();
@@ -1921,83 +1964,30 @@ void MainWindow::onGoalSessionTimeUpdated(int goalId, int elapsedSeconds)
     qDebug() << "MainWindow: Goal" << goalId << "session time updated:" << elapsedSeconds << "seconds";
     // Store the temporary session progress in seconds
     m_currentSessionProgress[goalId] = elapsedSeconds;
-
-    for (int i = 0; i < goalsListWidget->count(); ++i) {
-        QListWidgetItem *item = goalsListWidget->item(i);
-        if (item->data(Qt::UserRole).toInt() == goalId) {
-            GoalInfo details;
-            QList<GoalInfo> goalsForDate = studyGoal->getGoalsForDate(QDate::currentDate());
-            for (const auto& g : goalsForDate) {
-                if (g.id == goalId) {
-                    details = g;
-                    break;
-                }
-            }
-            if (details.id == -1) { 
-                QMap<QString, QVariant> qmapDetails = studyGoal->getGoalDetails(goalId);
-                details.subject = qmapDetails["subject"].toString();
-                details.completedMinutes = qmapDetails["completed_minutes"].toInt();
-                details.targetMinutes = qmapDetails["target_minutes"].toInt();
-                details.recurrenceType = qmapDetails["recurrence_type"].toString();
-                details.recurrenceValue = qmapDetails["recurrence_value"].toString();
-                details.category = qmapDetails["category"].toString();
-            }
-
-
-            int completedMinutesFromDB = details.completedMinutes;
-            int totalTargetMinutes = details.targetMinutes;
-
-            // Calculate current session minutes and seconds
-            int currentSessionMinutes = elapsedSeconds / 60;
-            int currentSessionSeconds = elapsedSeconds % 60;
-
-            // Calculate total minutes for display (from DB + current session)
-            int totalCompletedMinutesForDisplay = completedMinutesFromDB + currentSessionMinutes;
-
-            float completionPercentage = 0.0f;
-            if (totalTargetMinutes > 0) {
-                completionPercentage = (float)totalCompletedMinutesForDisplay / totalTargetMinutes * 100.0f;
-            }
-
-            // Update the item text to show real-time progress, including seconds for current session
-            QString recurrenceType = details.recurrenceType;
-            QString recurrenceValue = details.recurrenceValue;
-            QString category = details.category;
-
-            QString display = QString("%1 (%2): %3/%4 minutes (%5%) (Current Session: %6:%7)")
-                                  .arg(details.subject)
-                                  .arg(category)
-                                  .arg(totalCompletedMinutesForDisplay)
-                                  .arg(totalTargetMinutes)
-                                  .arg(completionPercentage, 0, 'f', 1)
-                                  .arg(currentSessionMinutes, 2, 10, QChar('0'))
-                                  .arg(currentSessionSeconds, 2, 10, QChar('0'));
-
-            if (recurrenceType != "None") {
-                display += QString(" [%1").arg(recurrenceType);
-                if (!recurrenceValue.isEmpty()) {
-                    display += QString(": %1").arg(recurrenceValue);
-                }
-                display += "]";
-            }
-            item->setText(display);
-            break;
-        }
-    }
+    // No more goalsListWidget updates here
 }
 
 void MainWindow::onGoalSessionProgressUpdated(int goalId, int sessionMinutes)
 {
-    Q_UNUSED(sessionMinutes);
-    qDebug() << "MainWindow: Goal" << goalId << "completed session. Refreshing display.";
+    qDebug() << "onGoalSessionProgressUpdated called for goal" << goalId << "sessionMinutes:" << sessionMinutes;
     m_currentSessionProgress.remove(goalId);
     refreshGoalsDisplay();
 
     // Check if goal is completed
     float completionPercentage = studyGoal->getCompletionPercentage(goalId);
     if (completionPercentage >= 100.0f) {
+        // Stop Pomodoro if running
+        if (pomodoroTimer && pomodoroTimer->isRunning()) {
+            pomodoroTimer->pause();
+        }
+        // Stop webcam session if running
+        if (webcamActive) {
+            qDebug() << "Stopping webcam session because goal" << goalId << "is completed.";
+            stopWebcam();
+        }
         QMessageBox::information(this, "Goal Completed!",
                                  QString("Congratulations! You have completed your goal for '%1'!").arg(studyGoal->getGoalDetails(goalId)["subject"].toString()));
+        refreshGoalsDisplay(); // Ensure UI updates after dialog
     }
 }
 
@@ -2005,28 +1995,30 @@ void MainWindow::onGoalTrackingStarted(int goalId)
 {
     Q_UNUSED(goalId);
     m_currentActiveGoalId = goalId;
-    startTrackingButton->setEnabled(false);
-    stopTrackingButton->setEnabled(true);
+    progressUpdateTimer->start();
     QMessageBox::information(this, "Goal Tracking", "Tracking started for selected goal.");
 }
 
 void MainWindow::onGoalTrackingStopped()
 {
-    startTrackingButton->setEnabled(true);
-    stopTrackingButton->setEnabled(false);
+    progressUpdateTimer->stop();
 }
 
 void MainWindow::handleGoalDeleted(int goalId)
 {
     Q_UNUSED(goalId);
     if (m_currentActiveGoalId == goalId) {
-        handleStopGoalTracking();
+       // handleStopGoalTracking();
     }
     refreshGoalsDisplay();
 }
 
 void MainWindow::onAchievementUnlocked(const QString &achievementId, const QString &name)
 {
+    // Desktop notification for achievement unlock
+    if (trayIcon && QSystemTrayIcon::supportsMessages()) {
+        trayIcon->showMessage(tr("Achievement Unlocked!"), QString("Congratulations! You've unlocked the '%1' achievement!").arg(name), QSystemTrayIcon::Information, 3000);
+    }
     QMessageBox::information(this, "Achievement Unlocked!", QString("Congratulations! You've unlocked the '%1' achievement!").arg(name));
     refreshAchievementsDisplay();
 }
@@ -2059,9 +2051,9 @@ void MainWindow::handleCancelEdit()
 
     addGoalButton->setText("Add Goal");
     cancelEditButton->setEnabled(false);
-    startTrackingButton->setEnabled(false);
-    stopTrackingButton->setEnabled(false);
-    goalsListWidget->clearSelection();
+    //startTrackingButton->setEnabled(false);
+    //stopTrackingButton->setEnabled(false);
+    //goalsListWidget->clearSelection();
 }
 
 void MainWindow::setupDarkAcademiaTheme()
@@ -2134,473 +2126,6 @@ void MainWindow::setupDarkAcademiaTheme()
     qApp->setStyleSheet(styleSheet);
 }
 
-void MainWindow::createSessionPlanner()
-{
-    QDialog *sessionPlannerDialog = new QDialog(this);
-    sessionPlannerDialog->setWindowTitle("Plan Study Session");
-    sessionPlannerDialog->setMinimumSize(400, 300);
-
-    QVBoxLayout *mainLayout = new QVBoxLayout(sessionPlannerDialog);
-    QFormLayout *formLayout = new QFormLayout();
-
-    // Goal Selection Section
-    QListWidget *goalSelectList = new QListWidget();
-    QGroupBox *goalSelectGroup = new QGroupBox("Select Goals for this Session");
-    QVBoxLayout *goalSelectLayout = new QVBoxLayout(goalSelectGroup);
-    goalSelectList->setSelectionMode(QAbstractItemView::MultiSelection);
-    QList<GoalInfo> allGoals = studyGoal->getGoalsForDate(QDate::currentDate());
-    for (const auto &goal : allGoals) {
-        QListWidgetItem *item = new QListWidgetItem(goal.subject + " (" + goal.category + ")");
-        item->setData(Qt::UserRole, goal.id);
-        goalSelectList->addItem(item);
-    }
-    goalSelectLayout->addWidget(goalSelectList);
-    mainLayout->addWidget(goalSelectGroup);
-
-    // Subject/Topic
-    QLineEdit *subjectInput = new QLineEdit();
-    subjectInput->setPlaceholderText("e.g., Quantum Physics, French Grammar");
-    formLayout->addRow("Subject/Topic:", subjectInput);
-
-    // Session Goals/Objectives
-    QTextEdit *goalsInput = new QTextEdit();
-    goalsInput->setPlaceholderText("e.g., Understand Chapter 5, Memorize 20 new words");
-    formLayout->addRow("Session Goals:", goalsInput);
-
-    // Resource Linking
-    QHBoxLayout *resourceLayout = new QHBoxLayout();
-    QLineEdit *resourceLinkInput = new QLineEdit();
-    resourceLinkInput->setPlaceholderText("Select a file or enter a URL");
-    QPushButton *browseButton = new QPushButton("Browse...");
-    resourceLayout->addWidget(resourceLinkInput);
-    resourceLayout->addWidget(browseButton);
-    formLayout->addRow("Resource Link:", resourceLayout);
-
-    connect(browseButton, &QPushButton::clicked, this, [resourceLinkInput]() {
-        QString filePath = QFileDialog::getOpenFileName(nullptr, "Select Resource File");
-        if (!filePath.isEmpty()) {
-            resourceLinkInput->setText(filePath);
-        }
-    });
-
-    // Pre-session Mental State Assessment
-    QComboBox *mentalStateCombo = new QComboBox();
-    mentalStateCombo->addItems({"Excellent", "Good", "Neutral", "Tired", "Distracted"});
-    formLayout->addRow("Mental State:", mentalStateCombo);
-
-    mainLayout->addLayout(formLayout);
-
-    //  Resource Management Section for Session Planner
-    QGroupBox *resourceGroupPlanner = new QGroupBox("Resources");
-    QVBoxLayout *resourceLayoutPlanner = new QVBoxLayout(resourceGroupPlanner);
-    QPushButton *addFileButtonPlanner = new QPushButton("Add File");
-    resourceLayoutPlanner->addWidget(addFileButtonPlanner);
-    QHBoxLayout *linkLayoutPlanner = new QHBoxLayout();
-    QLineEdit *linkInputPlanner = new QLineEdit();
-    linkInputPlanner->setPlaceholderText("Paste link here...");
-    QPushButton *addLinkButtonPlanner = new QPushButton("Add Link");
-    linkLayoutPlanner->addWidget(linkInputPlanner);
-    linkLayoutPlanner->addWidget(addLinkButtonPlanner);
-    resourceLayoutPlanner->addLayout(linkLayoutPlanner);
-    QHBoxLayout *noteLayoutPlanner = new QHBoxLayout();
-    QTextEdit *noteInputPlanner = new QTextEdit();
-    noteInputPlanner->setPlaceholderText("Add a note...");
-    noteInputPlanner->setMaximumHeight(50);
-    QPushButton *addNoteButtonPlanner = new QPushButton("Add Note");
-    noteLayoutPlanner->addWidget(noteInputPlanner);
-    noteLayoutPlanner->addWidget(addNoteButtonPlanner);
-    resourceLayoutPlanner->addLayout(noteLayoutPlanner);
-    QListWidget *resourceListPlanner = new QListWidget();
-    resourceLayoutPlanner->addWidget(resourceListPlanner);
-    mainLayout->addWidget(resourceGroupPlanner);
-
-    int tempSessionId = -1;
-    auto refreshResourceList = [this, resourceListPlanner, &tempSessionId]() {
-        resourceListPlanner->clear();
-        if (tempSessionId == -1) return;
-        QSqlQuery query(db);
-        query.prepare("SELECT id, type, value, description FROM session_resources WHERE session_id = ?");
-        query.addBindValue(tempSessionId);
-        if (query.exec()) {
-            while (query.next()) {
-                QString type = query.value(1).toString();
-                QString value = query.value(2).toString();
-                QString desc = query.value(3).toString();
-                QString display = type.toUpper() + ": " + (desc.isEmpty() ? value : desc);
-                QListWidgetItem *item = new QListWidgetItem(display);
-                item->setData(Qt::UserRole, query.value(0).toInt());
-                item->setData(Qt::UserRole + 1, type);
-                item->setData(Qt::UserRole + 2, value);
-                resourceListPlanner->addItem(item);
-            }
-        }
-    };
-
-    connect(addFileButtonPlanner, &QPushButton::clicked, this, [this, &tempSessionId, refreshResourceList]() {
-        if (tempSessionId == -1) { QMessageBox::warning(this, "No Session Saved", "Please save the session plan first."); return; }
-        QString filePath = QFileDialog::getOpenFileName(this, "Select File to Attach");
-        if (!filePath.isEmpty()) {
-            QSqlQuery query(db);
-            query.prepare("INSERT INTO session_resources (session_id, type, value) VALUES (?, 'file', ?)");
-            query.addBindValue(tempSessionId);
-            query.addBindValue(filePath);
-            query.exec();
-            refreshResourceList();
-        }
-    });
-    connect(addLinkButtonPlanner, &QPushButton::clicked, this, [this, linkInputPlanner, &tempSessionId, refreshResourceList]() {
-        QString link = linkInputPlanner->text().trimmed();
-        if (tempSessionId == -1 || link.isEmpty()) return;
-        QSqlQuery query(db);
-        query.prepare("INSERT INTO session_resources (session_id, type, value) VALUES (?, 'link', ?)");
-        query.addBindValue(tempSessionId);
-        query.addBindValue(link);
-        query.exec();
-        linkInputPlanner->clear();
-        refreshResourceList();
-    });
-    connect(addNoteButtonPlanner, &QPushButton::clicked, this, [this, noteInputPlanner, &tempSessionId, refreshResourceList]() {
-        QString note = noteInputPlanner->toPlainText().trimmed();
-        if (tempSessionId == -1 || note.isEmpty()) return;
-        QSqlQuery query(db);
-        query.prepare("INSERT INTO session_resources (session_id, type, value) VALUES (?, 'note', ?)");
-        query.addBindValue(tempSessionId);
-        query.addBindValue(note);
-        query.exec();
-        noteInputPlanner->clear();
-        refreshResourceList();
-    });
-    connect(resourceListPlanner, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
-        QString type = item->data(Qt::UserRole + 1).toString();
-        QString value = item->data(Qt::UserRole + 2).toString();
-        if (type == "file" || type == "link") {
-            QDesktopServices::openUrl(QUrl::fromLocalFile(value));
-        } else if (type == "note") {
-            QMessageBox::information(this, "Note", value);
-        }
-    });
-
-    // Buttons
-    QDialogButtonBox *buttonBox = new QDialogButtonBox(
-        QDialogButtonBox::Save | QDialogButtonBox::Cancel,
-        Qt::Horizontal, sessionPlannerDialog);
-    mainLayout->addWidget(buttonBox);
-
-    connect(buttonBox, &QDialogButtonBox::accepted, sessionPlannerDialog, &QDialog::accept);
-    connect(buttonBox, &QDialogButtonBox::rejected, sessionPlannerDialog, &QDialog::reject);
-
-    QList<int> selectedGoalIds;
-
-    if (sessionPlannerDialog->exec() == QDialog::Accepted) {
-        QString subject = subjectInput->text();
-        QString goals = goalsInput->toPlainText();
-        QString resourceLink = resourceLinkInput->text();
-        QString mentalState = mentalStateCombo->currentText();
-        QString planDate = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
-
-        QSqlQuery query;
-        query.prepare("INSERT INTO session_plans (subject, goals, resource_link, mental_state, plan_date) "
-                      "VALUES (?, ?, ?, ?, ?)");
-        query.addBindValue(subject);
-        query.addBindValue(goals);
-        query.addBindValue(resourceLink);
-        query.addBindValue(mentalState);
-        query.addBindValue(planDate);
-
-        if (!query.exec()) {
-            qDebug() << "Error saving session plan:" << query.lastError().text();
-            QMessageBox::critical(this, "Database Error", "Failed to save session plan: " + query.lastError().text());
-        } else {
-            int plannedSessionId = query.lastInsertId().toInt();
-            // Create a study_sessions record for this planned session
-            int sessionId = studySession->createSession(plannedSessionId, "planned", "Planned session created");
-            studySession->endSession(sessionId);
-            // Save session-goal links
-            selectedGoalIds.clear();
-            for (QListWidgetItem *item : goalSelectList->selectedItems()) {
-                selectedGoalIds.append(item->data(Qt::UserRole).toInt());
-            }
-            if (!query.exec()) {
-                qDebug() << "Error saving session plan:" << query.lastError().text();
-                QMessageBox::critical(this, "Database Error", "Failed to save session plan: " + query.lastError().text());
-            } else {
-                int plannedSessionId = query.lastInsertId().toInt();
-                // Create a study_sessions record for this planned session
-                int sessionId = studySession->createSession(plannedSessionId, "planned", "Planned session created");
-                studySession->endSession(sessionId);
-                //  Save session-goal links
-                for (int goalId : selectedGoalIds) {
-                    QSqlQuery linkQuery(db);
-                    linkQuery.prepare("INSERT INTO session_goals (session_id, goal_id) VALUES (?, ?)");
-                    linkQuery.addBindValue(sessionId);
-                    linkQuery.addBindValue(goalId);
-                    linkQuery.exec();
-                }
-                qDebug() << "Session Plan and StudySession Saved to DB:";
-                qDebug() << "  Subject:" << subject;
-                qDebug() << "  Goals:" << goals;
-                qDebug() << "  Resource Link:" << resourceLink;
-                qDebug() << "  Mental State:" << mentalState;
-                QMessageBox::information(this, "Session Planned", "Your study session has been planned and saved!");
-                tempSessionId = sessionId;
-                refreshResourceList();
-            }
-        }
-    } else {
-        QMessageBox::information(this, "Session Planning", "Session planning cancelled.");
-    }
-    sessionPlannerDialog->deleteLater();
-
-
-    resourceListPlanner->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(resourceListPlanner, &QListWidget::customContextMenuRequested, this, [this, resourceListPlanner, refreshResourceList](const QPoint &pos) {
-        QListWidgetItem *item = resourceListPlanner->itemAt(pos);
-        if (!item) return;
-        QMenu menu;
-        QAction *deleteAction = menu.addAction("Delete Resource");
-        QAction *selectedAction = menu.exec(resourceListPlanner->viewport()->mapToGlobal(pos));
-        if (selectedAction == deleteAction) {
-            int resourceId = item->data(Qt::UserRole).toInt();
-            QSqlQuery query(db);
-            query.prepare("DELETE FROM session_resources WHERE id = ?");
-            query.addBindValue(resourceId);
-            query.exec();
-            refreshResourceList();
-        }
-    });
-}
-
-void MainWindow::implementSessionReview()
-{
-    QDialog *sessionReviewDialog = new QDialog(this);
-    sessionReviewDialog->setWindowTitle("Session Review");
-    sessionReviewDialog->setMinimumSize(450, 400);
-
-    // Create main container widget and layout
-    QWidget *container = new QWidget();
-    QVBoxLayout *containerLayout = new QVBoxLayout(container);
-    
-    // Create scroll area
-    QScrollArea *scrollArea = new QScrollArea();
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setWidget(container);
-    
-    QVBoxLayout *mainLayout = new QVBoxLayout(sessionReviewDialog);
-    mainLayout->addWidget(scrollArea);
-    QFormLayout *formLayout = new QFormLayout();
-
-    // Retrieve the most recent session plan
-    QSqlQuery planQuery;
-    planQuery.exec("SELECT id, subject, goals FROM session_plans ORDER BY plan_date DESC LIMIT 1");
-    int currentSessionPlanId = -1;
-    QString plannedSubject = "N/A";
-    QString plannedGoals = "N/A";
-
-    if (planQuery.next()) {
-        currentSessionPlanId = planQuery.value("id").toInt();
-        plannedSubject = planQuery.value("subject").toString();
-        plannedGoals = planQuery.value("goals").toString();
-    }
-
-    QLabel *planSummaryLabel = new QLabel(QString("<b>Last Planned Session:</b><br/>Subject: %1<br/>Goals: %2").arg(plannedSubject, plannedGoals));
-    planSummaryLabel->setWordWrap(true);
-    formLayout->addRow("", planSummaryLabel);
-
-    // Display Current Session Metrics
-    QLabel *sessionDurationReviewLabel = new QLabel(QString("Duration: %1").arg(sessionDurationLabel->text().remove("Duration: ")));
-    QLabel *blinkCountReviewLabel = new QLabel(QString("Total Blinks: %1").arg(blinkCount));
-    QLabel *focusScoreReviewLabel = new QLabel(QString("Average Focus: %1%").arg(QString::number(currentFocusScore, 'f', 1)));
-
-    formLayout->addRow("Current Session Stats:", sessionDurationReviewLabel);
-    formLayout->addRow("", blinkCountReviewLabel);
-    formLayout->addRow("", focusScoreReviewLabel);
-
-    // Self-reported Effectiveness
-    QComboBox *effectivenessCombo = new QComboBox();
-    effectivenessCombo->addItems({"Highly Effective", "Moderately Effective", "Neutral", "Slightly Ineffective", "Highly Ineffective"});
-    formLayout->addRow("Effectiveness:", effectivenessCombo);
-
-    // Distraction Events
-    QTextEdit *distractionEventsInput = new QTextEdit();
-    distractionEventsInput->setPlaceholderText("Describe any distractions encountered...");
-    distractionEventsInput->setMaximumHeight(100);
-    formLayout->addRow("Distraction Events:", distractionEventsInput);
-
-    // Notes/Learnings
-    QTextEdit *notesInput = new QTextEdit();
-    notesInput->setPlaceholderText("Enter your notes, learnings, or observations from the session...");
-    notesInput->setMaximumHeight(100);
-    formLayout->addRow("Notes/Learnings:", notesInput);
-
-    containerLayout->addLayout(formLayout);
-
-    // Resource Management Section for Session Review
-    QGroupBox *resourceGroupReview = new QGroupBox("Resources");
-    QVBoxLayout *resourceLayoutReview = new QVBoxLayout(resourceGroupReview);
-    QPushButton *addFileButtonReview = new QPushButton("Add File");
-    resourceLayoutReview->addWidget(addFileButtonReview);
-    QHBoxLayout *linkLayoutReview = new QHBoxLayout();
-    QLineEdit *linkInputReview = new QLineEdit();
-    linkInputReview->setPlaceholderText("Paste link here...");
-    QPushButton *addLinkButtonReview = new QPushButton("Add Link");
-    linkLayoutReview->addWidget(linkInputReview);
-    linkLayoutReview->addWidget(addLinkButtonReview);
-    resourceLayoutReview->addLayout(linkLayoutReview);
-    QHBoxLayout *noteLayoutReview = new QHBoxLayout();
-    QTextEdit *noteInputReview = new QTextEdit();
-    noteInputReview->setPlaceholderText("Add a note...");
-    noteInputReview->setMaximumHeight(50);
-    QPushButton *addNoteButtonReview = new QPushButton("Add Note");
-    noteLayoutReview->addWidget(noteInputReview);
-    noteLayoutReview->addWidget(addNoteButtonReview);
-    resourceLayoutReview->addLayout(noteLayoutReview);
-    QListWidget *resourceListReview = new QListWidget();
-    resourceListReview->setMaximumHeight(150);
-    resourceLayoutReview->addWidget(resourceListReview);
-    containerLayout->addWidget(resourceGroupReview);
-
-    int tempSessionId = -1;
-    auto refreshResourceList = [this, resourceListReview, &tempSessionId]() {
-        resourceListReview->clear();
-        if (tempSessionId == -1) return;
-        QSqlQuery query(db);
-        query.prepare("SELECT id, type, value, description FROM session_resources WHERE session_id = ?");
-        query.addBindValue(tempSessionId);
-        if (query.exec()) {
-            while (query.next()) {
-                QString type = query.value(1).toString();
-                QString value = query.value(2).toString();
-                QString desc = query.value(3).toString();
-                QString display = type.toUpper() + ": " + (desc.isEmpty() ? value : desc);
-                QListWidgetItem *item = new QListWidgetItem(display);
-                item->setData(Qt::UserRole, query.value(0).toInt());
-                item->setData(Qt::UserRole + 1, type);
-                item->setData(Qt::UserRole + 2, value);
-                resourceListReview->addItem(item);
-            }
-        }
-    };
-
-    connect(addFileButtonReview, &QPushButton::clicked, this, [this, &tempSessionId, refreshResourceList]() {
-        if (tempSessionId == -1) { QMessageBox::warning(this, "No Session Saved", "Please save the session plan first."); return; }
-        QString filePath = QFileDialog::getOpenFileName(this, "Select File to Attach");
-        if (!filePath.isEmpty()) {
-            QSqlQuery query(db);
-            query.prepare("INSERT INTO session_resources (session_id, type, value) VALUES (?, 'file', ?)");
-            query.addBindValue(tempSessionId);
-            query.addBindValue(filePath);
-            query.exec();
-            refreshResourceList();
-        }
-    });
-    connect(addLinkButtonReview, &QPushButton::clicked, this, [this, linkInputReview, &tempSessionId, refreshResourceList]() {
-        QString link = linkInputReview->text().trimmed();
-        if (tempSessionId == -1 || link.isEmpty()) return;
-        QSqlQuery query(db);
-        query.prepare("INSERT INTO session_resources (session_id, type, value) VALUES (?, 'link', ?)");
-        query.addBindValue(tempSessionId);
-        query.addBindValue(link);
-        query.exec();
-        linkInputReview->clear();
-        refreshResourceList();
-    });
-    connect(addNoteButtonReview, &QPushButton::clicked, this, [this, noteInputReview, &tempSessionId, refreshResourceList]() {
-        QString note = noteInputReview->toPlainText().trimmed();
-        if (tempSessionId == -1 || note.isEmpty()) return;
-        QSqlQuery query(db);
-        query.prepare("INSERT INTO session_resources (session_id, type, value) VALUES (?, 'note', ?)");
-        query.addBindValue(tempSessionId);
-        query.addBindValue(note);
-        query.exec();
-        noteInputReview->clear();
-        refreshResourceList();
-    });
-    connect(resourceListReview, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
-        QString type = item->data(Qt::UserRole + 1).toString();
-        QString value = item->data(Qt::UserRole + 2).toString();
-        if (type == "file" || type == "link") {
-            QDesktopServices::openUrl(QUrl::fromLocalFile(value));
-        } else if (type == "note") {
-            QMessageBox::information(this, "Note", value);
-        }
-    });
-
-    containerLayout->addStretch();
-
-    // Buttons - outside the scroll area
-    QDialogButtonBox *buttonBox = new QDialogButtonBox(
-        QDialogButtonBox::Save | QDialogButtonBox::Cancel,
-        Qt::Horizontal, sessionReviewDialog);
-    mainLayout->addWidget(buttonBox);
-
-    connect(buttonBox, &QDialogButtonBox::accepted, sessionReviewDialog, &QDialog::accept);
-    connect(buttonBox, &QDialogButtonBox::rejected, sessionReviewDialog, &QDialog::reject);
-
-    if (sessionReviewDialog->exec() == QDialog::Accepted) {
-        QString effectiveness = effectivenessCombo->currentText();
-        QString distractions = distractionEventsInput->toPlainText();
-        QString notes = notesInput->toPlainText();
-        QString reviewDate = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
-
-        // Attach review to the current or most recent study session
-        int sessionId = studySession->getCurrentSessionId();
-        if (sessionId == -1) {
-            // Get the most recent session
-            QSqlQuery lastSessionQuery;
-            lastSessionQuery.exec("SELECT id FROM study_sessions ORDER BY end_time DESC LIMIT 1");
-            if (lastSessionQuery.next()) {
-                sessionId = lastSessionQuery.value(0).toInt();
-            }
-        }
-
-        QSqlQuery reviewQuery;
-        reviewQuery.prepare("INSERT INTO session_reviews (session_plan_id, focus_score, distraction_events, effectiveness, notes, review_date, session_id) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)");
-        reviewQuery.addBindValue(currentSessionPlanId);
-        reviewQuery.addBindValue(currentFocusScore);
-        reviewQuery.addBindValue(distractions);
-        reviewQuery.addBindValue(effectiveness);
-        reviewQuery.addBindValue(notes);
-        reviewQuery.addBindValue(reviewDate);
-        reviewQuery.addBindValue(sessionId);
-
-        if (!reviewQuery.exec()) {
-            qDebug() << "Error saving session review:" << reviewQuery.lastError().text();
-            QMessageBox::critical(this, "Database Error", "Failed to save session review: " + reviewQuery.lastError().text());
-        } else {
-            qDebug() << "Session Review Saved to DB:";
-            qDebug() << "  Session Plan ID:" << currentSessionPlanId;
-            qDebug() << "  Session ID:" << sessionId;
-            qDebug() << "  Focus Score:" << currentFocusScore;
-            qDebug() << "  Distractions:" << distractions;
-            qDebug() << "  Effectiveness:" << effectiveness;
-            qDebug() << "  Notes:" << notes;
-            QMessageBox::information(this, "Session Review", "Session review saved successfully!");
-        }
-    } else {
-        QMessageBox::information(this, "Session Review", "Session review cancelled.");
-    }
-
-    sessionReviewDialog->deleteLater();
-
-    // Context menu for resource deletion
-    resourceListReview->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(resourceListReview, &QListWidget::customContextMenuRequested, this, [this, resourceListReview, refreshResourceList](const QPoint &pos) {
-        QListWidgetItem *item = resourceListReview->itemAt(pos);
-        if (!item) return;
-        QMenu menu;
-        QAction *deleteAction = menu.addAction("Delete Resource");
-        QAction *selectedAction = menu.exec(resourceListReview->viewport()->mapToGlobal(pos));
-        if (selectedAction == deleteAction) {
-            int resourceId = item->data(Qt::UserRole).toInt();
-            QSqlQuery query(db);
-            query.prepare("DELETE FROM session_resources WHERE id = ?");
-            query.addBindValue(resourceId);
-            query.exec();
-            refreshResourceList();
-        }
-    });
-}
 float MainWindow::calculateHeadPose(const std::vector<cv::Point2f>& landmarks)
 {
     if (landmarks.empty()) return 0.0f;
@@ -2724,4 +2249,1439 @@ void MainWindow::showSummaryPopup(bool weekly)
     msgBox.setTextFormat(Qt::RichText);
     msgBox.setText(summary);
     msgBox.exec();
+}
+
+void MainWindow::updateGoalProgressBars()
+{
+    QList<GoalInfo> goals = studyGoal->getGoalsForDate(QDate::currentDate());
+    for (int i = 0; i < goals.size(); ++i) {
+        const GoalInfo& goal = goals[i];
+        QLayoutItem* item = goalsCardLayout->itemAtPosition(i / 3, i % 3);
+        if (!item) continue;
+        QWidget* card = item->widget();
+        if (!card) continue;
+        QProgressBar* progress = card->findChild<QProgressBar*>();
+        if (!progress) continue;
+
+        int completed = goal.completedMinutes;
+        int target = goal.targetMinutes > 0 ? goal.targetMinutes : 1;
+        int total = completed;
+
+        // Only use session progress for the currently tracked goal, and only if tracking is active
+        if (goal.id == m_currentActiveGoalId && pomodoroTimer && pomodoroTimer->isRunning()) {
+            int elapsedSeconds = m_currentSessionProgress.value(goal.id, 0);
+            int elapsedMinutes = elapsedSeconds / 60;
+            total = completed + elapsedMinutes;
+        }
+        // For all other goals, always use completedMinutes from the database
+
+        float percent = (target > 0) ? (float)total / target * 100.0f : 0.0f;
+        progress->setRange(0, target);
+        progress->setValue(total);
+        progress->setFormat(QString("%1/%2 minutes (%3%)").arg(total).arg(target).arg(percent, 0, 'f', 1));
+    }
+}
+
+void MainWindow::showYearlyActivityDialog()
+{
+    int currentYear = QDate::currentDate().year();
+    QDialog dialog(this);
+    dialog.setWindowTitle("Yearly Activity");
+    dialog.resize(1100, 340);
+    QVBoxLayout *mainLayout = new QVBoxLayout(&dialog);
+
+    // Year navigation controls
+    QHBoxLayout *yearNavLayout = new QHBoxLayout();
+    QPushButton *prevYearBtn = new QPushButton("◀");
+    QPushButton *nextYearBtn = new QPushButton("▶");
+    QLabel *yearLabel = new QLabel(QString::number(currentYear));
+    yearLabel->setAlignment(Qt::AlignCenter);
+    yearLabel->setMinimumWidth(60);
+    yearNavLayout->addWidget(prevYearBtn);
+    yearNavLayout->addWidget(yearLabel);
+    yearNavLayout->addWidget(nextYearBtn);
+    yearNavLayout->addStretch();
+    mainLayout->addLayout(yearNavLayout);
+
+    // Widgets to update
+    QLabel *counter = new QLabel();
+    mainLayout->addWidget(counter, 0, Qt::AlignLeft);
+    QHBoxLayout *monthLayout = new QHBoxLayout();
+    monthLayout->addSpacing(40);
+    for (int m = 1; m <= 12; ++m) {
+        QLabel *monthLabel = new QLabel(QLocale::system().monthName(m, QLocale::ShortFormat));
+        monthLabel->setAlignment(Qt::AlignCenter);
+        monthLabel->setMinimumWidth(70);
+        monthLayout->addWidget(monthLabel);
+    }
+    mainLayout->addLayout(monthLayout);
+    QGridLayout *grid = new QGridLayout();
+    QStringList weekdays = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+    for (int i = 0; i < weekdays.size(); ++i) {
+        QLabel *lbl = new QLabel(weekdays[i]);
+        lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        grid->addWidget(lbl, i+1, 0);
+    }
+    mainLayout->addLayout(grid);
+
+    auto updateCalendar = [&](int year) {
+        yearLabel->setText(QString::number(year));
+        // Remove old cells
+        QLayoutItem *item;
+        while ((item = grid->takeAt(grid->count()-1))) {
+            if (item->widget() && item->widget()->parent() == &dialog) {
+                delete item->widget();
+            }
+            delete item;
+        }
+        // Re-add weekday labels
+        for (int i = 0; i < weekdays.size(); ++i) {
+            QLabel *lbl = new QLabel(weekdays[i]);
+            lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            grid->addWidget(lbl, i+1, 0);
+        }
+        // Get study days
+        QMap<QDate, int> studyDays = studyStreak->getStudyHistory(QDate(year, 1, 1), QDate(year, 12, 31));
+        int totalEvents = 0;
+        for (auto v : studyDays.values()) if (v > 0) totalEvents++;
+        counter->setText(QString("<b>Total study days this year:</b> %1").arg(totalEvents));
+        // Fill grid
+        QDate firstDay(year, 1, 1);
+        QDate lastDay(year, 12, 31);
+        int colOffset = 1;
+        QDate d = firstDay;
+        while (d <= lastDay) {
+            int week = d.weekNumber();
+            int weekday = d.dayOfWeek();
+            int col = ((d.dayOfYear() - 1) / 7) + colOffset;
+            int row = weekday;
+            QFrame *cell = new QFrame();
+            cell->setFixedSize(16, 16);
+            int minutes = studyDays.value(d, 0);
+            // Heatmap color: white (no study), light red (few min), dark red (many min)
+            QString color;
+            if (minutes == 0) color = "#eee";
+            else if (minutes < 15) color = "#ffb3b3";
+            else if (minutes < 30) color = "#ff6666";
+            else if (minutes < 60) color = "#ff1a1a";
+            else if (minutes < 120) color = "#c3073f";
+            else color = "#800000";
+            cell->setStyleSheet(QString("background:%1; border-radius:3px; border:1px solid #eee;").arg(color));
+            // Tooltip with date and minutes
+            cell->setToolTip(QString("%1\n%2 minutes studied").arg(d.toString("yyyy-MM-dd")).arg(minutes));
+            grid->addWidget(cell, row, col);
+            d = d.addDays(1);
+        }
+    };
+    int shownYear = currentYear;
+    updateCalendar(shownYear);
+    QObject::connect(prevYearBtn, &QPushButton::clicked, [&]() {
+        shownYear--;
+        updateCalendar(shownYear);
+    });
+    QObject::connect(nextYearBtn, &QPushButton::clicked, [&]() {
+        shownYear++;
+        updateCalendar(shownYear);
+    });
+    QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Close);
+    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    mainLayout->addWidget(buttonBox);
+    dialog.exec();
+}
+
+// Add eventFilter to MainWindow to handle card clicks
+bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
+    if (event->type() == QEvent::MouseButtonPress) {
+        QWidget *card = qobject_cast<QWidget *>(obj);
+        if (card && card->property("goalId").isValid()) {
+            int goalId = card->property("goalId").toInt();
+            // Find the goal info
+            QList<GoalInfo> goals = studyGoal->getGoalsForDate(QDate::currentDate());
+            for (const auto &goal : goals) {
+                if (goal.id == goalId) {
+                    goalSubjectInput->setText(goal.subject);
+                    goalTargetMinutesInput->setValue(goal.targetMinutes);
+                    goalNotesInput->setPlainText(goal.notes);
+                    goalCategoryCombo->setCurrentText(goal.category);
+                    recurrenceTypeCombo->setCurrentText(goal.recurrenceType);
+                    recurrenceValueInput->setText(goal.recurrenceValue);
+                    // Resources
+                    QListWidget *resourceList = createGoalGroup->findChild<QListWidget *>();
+                    if (resourceList) {
+                        resourceList->clear();
+                        for (const QString &res : goal.resources) {
+                            resourceList->addItem(res);
+                        }
+                    }
+                    m_currentSelectedGoalId = goal.id;
+                    addGoalButton->setText("Update Goal");
+                    cancelEditButton->setEnabled(true);
+                    break;
+                }
+            }
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
+}
+
+void MainWindow::createSurveysTab()
+{
+    QWidget *surveysTab = new QWidget();
+    QVBoxLayout *mainLayout = new QVBoxLayout(surveysTab);
+    QScrollArea *scrollArea = new QScrollArea();
+    scrollArea->setWidgetResizable(true);
+    QWidget *formWidget = new QWidget();
+    QVBoxLayout *layout = new QVBoxLayout(formWidget);
+    Survey *survey = new Survey(db, this);
+
+    // 1. Goal selection dropdown
+    QComboBox *goalCombo = new QComboBox();
+    QList<GoalInfo> completedGoals = studyGoal->getGoalsForDate(QDate::currentDate());
+    QMap<int, QString> goalIdToText;
+    for (const auto &goal : completedGoals) {
+        if (goal.completedMinutes >= goal.targetMinutes && goal.targetMinutes > 0) {
+            QString text = QString("%1 (%2)").arg(goal.subject, goal.category);
+            goalCombo->addItem(text, goal.id);
+            goalIdToText[goal.id] = text;
+        }
+    }
+    layout->addWidget(new QLabel("Select Completed Goal:"));
+    layout->addWidget(goalCombo);
+
+    // 2. Mood/energy emoji grid
+    layout->addWidget(new QLabel("How did you feel after this session?"));
+    QWidget *emojiWidget = new QWidget();
+    QGridLayout *emojiGrid = new QGridLayout(emojiWidget);
+    struct EmojiMood { QString emoji; QString text; };
+    QList<EmojiMood> emojiMoods = {
+        {"😃", "Happy"}, {"🙂", "Content"}, {"😐", "Neutral"}, {"😫", "Tired"}, {"😡", "Frustrated"},
+        {"😍", "Loved it"}, {"😎", "Confident"}, {"😭", "Overwhelmed"}, {"😴", "Sleepy"}, {"🤔", "Thoughtful"},
+        {"😤", "Determined"}, {"😅", "Relieved"}, {"😇", "Proud"}, {"😬", "Anxious"}, {"😱", "Stressed"}
+    };
+    QList<QPushButton*> emojiButtons;
+    int colCount = 5;
+    for (int i = 0; i < emojiMoods.size(); ++i) {
+        const EmojiMood &em = emojiMoods[i];
+        QPushButton *btn = new QPushButton(em.emoji + " " + em.text);
+        btn->setCheckable(true);
+        btn->setStyleSheet("font-size: 20px; background: transparent; border: 2px solid transparent; border-radius: 8px; padding: 4px 10px; transition: background 0.2s, color 0.2s, border 0.2s;");
+        emojiGrid->addWidget(btn, i / colCount, i % colCount);
+        emojiButtons.append(btn);
+        connect(btn, &QPushButton::clicked, this, [=]() {
+            if (btn->isChecked()) {
+                btn->setStyleSheet("font-size: 20px; background: #950740; color: white; border: 2px solid #950740; border-radius: 8px; padding: 4px 10px; transition: background 0.2s, color 0.2s, border 0.2s;");
+            } else {
+                btn->setStyleSheet("font-size: 20px; background: transparent; border: 2px solid transparent; border-radius: 8px; padding: 4px 10px; transition: background 0.2s, color 0.2s, border 0.2s;");
+            }
+        });
+    }
+    layout->addWidget(emojiWidget);
+
+    // 3. Distraction level slider
+    layout->addWidget(new QLabel("Distraction Level (0 = none, 100 = max):"));
+    QSlider *distractionSlider = new QSlider(Qt::Horizontal);
+    distractionSlider->setRange(0, 100);
+    distractionSlider->setValue(0);
+    distractionSlider->setStyleSheet(
+        "QSlider::groove:horizontal { height: 8px; background: #C3073F; border-radius: 4px; }"
+        "QSlider::handle:horizontal { background: #950740; border: 2px solid #C3073F; width: 18px; height: 18px; border-radius: 9px; margin: -5px 0; }"
+        "QSlider::sub-page:horizontal { background: #C3073F; border-radius: 4px; }"
+        "QSlider::add-page:horizontal { background: #333; border-radius: 4px; }"
+    );
+    layout->addWidget(distractionSlider);
+    QLabel *sliderValueLabel = new QLabel("0");
+    sliderValueLabel->setAlignment(Qt::AlignCenter);
+    sliderValueLabel->setStyleSheet("font-size: 14px; margin-top: 0px; padding-top: 0px; min-height: 0px; max-height: 18px;");
+    layout->addWidget(sliderValueLabel);
+    connect(distractionSlider, &QSlider::valueChanged, sliderValueLabel, [=](int value) {
+        sliderValueLabel->setText(QString::number(value));
+    });
+
+    // 4. Distraction checklist
+    layout->addWidget(new QLabel("What distracted you? (Select all that apply)"));
+    QList<QCheckBox*> distractionChecks;
+    for (const QString &d : survey->getCommonDistractions()) {
+        QCheckBox *cb = new QCheckBox(d);
+        layout->addWidget(cb);
+        distractionChecks.append(cb);
+    }
+
+    // --- Session Satisfaction (Stars) ---
+    layout->addWidget(new QLabel("Session Satisfaction:"));
+    QHBoxLayout *starLayout = new QHBoxLayout();
+    surveyStarButtons.clear();
+int maxStars = 5;
+for (int i = 0; i < maxStars; ++i) {
+    QPushButton *starBtn = new QPushButton("☆");
+    starBtn->setCheckable(true);
+    starBtn->setStyleSheet("font-size: 28px; color: #C3073F; background: transparent; border: none;");
+    starLayout->addWidget(starBtn);
+    surveyStarButtons.append(starBtn);
+}
+for (int i = 0; i < maxStars; ++i) {
+    connect(surveyStarButtons[i], &QPushButton::clicked, this, [this, i, maxStars]() {
+        for (int j = 0; j < maxStars; ++j) {
+            if (j <= i) {
+                surveyStarButtons[j]->setText("★");
+                surveyStarButtons[j]->setChecked(true);
+            } else {
+                surveyStarButtons[j]->setText("☆");
+                surveyStarButtons[j]->setChecked(false);
+            }
+        }
+    });
+}
+    starLayout->addStretch();
+    layout->addLayout(starLayout);
+
+    // --- Goal Achieved (Yes/No/Partial) ---
+    layout->addWidget(new QLabel("Did you achieve your goal for this session?"));
+    QHBoxLayout *goalAchievedLayout = new QHBoxLayout();
+    QButtonGroup *goalAchievedGroup = new QButtonGroup(this);
+    QRadioButton *yesBtn = new QRadioButton("Yes");
+    QRadioButton *noBtn = new QRadioButton("No");
+    QRadioButton *partialBtn = new QRadioButton("Partial");
+    goalAchievedGroup->addButton(yesBtn);
+    goalAchievedGroup->addButton(noBtn);
+    goalAchievedGroup->addButton(partialBtn);
+    goalAchievedLayout->addWidget(yesBtn);
+    goalAchievedLayout->addWidget(noBtn);
+    goalAchievedLayout->addWidget(partialBtn);
+    goalAchievedLayout->addStretch();
+    layout->addLayout(goalAchievedLayout);
+
+    // --- Open Feedback (Text Box) ---
+    layout->addWidget(new QLabel("Additional Feedback / Notes:"));
+    QTextEdit *feedbackEdit = new QTextEdit();
+    feedbackEdit->setPlaceholderText("Write any thoughts, challenges, or ideas...");
+    feedbackEdit->setMinimumHeight(40);
+    layout->addWidget(feedbackEdit);
+
+    // --- Set Reminder (Yes/No) ---
+    QCheckBox *reminderCheck = new QCheckBox("Set a reminder for your next session");
+    layout->addWidget(reminderCheck);
+
+    // 5. Save button
+    QPushButton *saveBtn = new QPushButton("Save Survey");
+    layout->addWidget(saveBtn);
+    QLabel *statusLabel = new QLabel();
+    layout->addWidget(statusLabel);
+
+    connect(saveBtn, &QPushButton::clicked, this, [=]() {
+        if (goalCombo->currentIndex() < 0) {
+            statusLabel->setText("Please select a completed goal.");
+            return;
+        }
+        int goalId = goalCombo->currentData().toInt();
+        QStringList moods;
+        for (QPushButton *btn : emojiButtons) {
+            if (btn->isChecked()) {
+                moods << btn->text();
+            }
+        }
+        if (moods.isEmpty()) {
+            statusLabel->setText("Please select your mood/energy.");
+            return;
+        }
+        int distractionLevel = distractionSlider->value();
+        QList<QString> distractions;
+        for (QCheckBox *cb : distractionChecks) {
+            if (cb->isChecked()) distractions.append(cb->text());
+        }
+        // --- Collect new fields ---
+        int sessionSatisfaction = 0;
+        for (int i = maxStars; i >= 1; --i) {
+            if ( surveyStarButtons[i-1]->isChecked()) {
+                sessionSatisfaction = i;
+                break;
+            }
+        }
+        QString goalAchieved;
+        if (yesBtn->isChecked()) goalAchieved = "Yes";
+        else if (noBtn->isChecked()) goalAchieved = "No";
+        else if (partialBtn->isChecked()) goalAchieved = "Partial";
+        QString openFeedback = feedbackEdit->toPlainText();
+        bool setReminder = reminderCheck->isChecked();
+        SurveyResult result;
+        result.goalId = goalId;
+        result.timestamp = QDateTime::currentDateTime();
+        result.moodEmoji = moods.join(", ");
+        result.distractionLevel = distractionLevel;
+        result.distractions = distractions;
+        result.sessionSatisfaction = sessionSatisfaction;
+        result.goalAchieved = goalAchieved;
+        result.openFeedback = openFeedback;
+        result.setReminder = setReminder;
+        if (survey->saveSurveyResult(result)) {
+            statusLabel->setText("Survey saved! Thank you for your feedback.");
+            for (QPushButton *btn : emojiButtons) btn->setChecked(false);
+            distractionSlider->setValue(0);
+            for (QCheckBox *cb : distractionChecks) cb->setChecked(false);
+            for (QPushButton *btn :  surveyStarButtons) { btn->setChecked(false); btn->setText("☆"); }
+            yesBtn->setChecked(false); noBtn->setChecked(false); partialBtn->setChecked(false);
+            feedbackEdit->clear();
+            reminderCheck->setChecked(false);
+            int idx = tabWidget->indexOf(surveysTab);
+             if (idx != -1) {
+             tabWidget->removeTab(idx);
+            }
+            createSurveysTab();
+            tabWidget->setCurrentIndex(tabWidget->count() - 1); // Optionally, keep user on Surveys tab
+        } else {
+            statusLabel->setText("Failed to save survey.");
+        }
+    });
+
+    // --- Survey History Section ---
+layout->addWidget(new QLabel("Survey History:"));
+QScrollArea *historyScroll = new QScrollArea();
+historyScroll->setWidgetResizable(true);
+QWidget *historyWidget = new QWidget();
+QHBoxLayout *historyLayout = new QHBoxLayout(historyWidget);
+historyLayout->setSpacing(24); // More space between cards
+
+// Get all goals with survey entries
+QSet<int> goalIdsWithSurveys;
+QList<SurveyResult> allResults = survey->getAllSurveyResults();
+for (const SurveyResult &r : allResults) goalIdsWithSurveys.insert(r.goalId);
+
+for (int goalId : goalIdsWithSurveys) {
+    QString goalText = goalIdToText.value(goalId, QString("Goal #%1").arg(goalId));
+    QPushButton *cardBtn = new QPushButton(goalText);
+    cardBtn->setStyleSheet("background: #222; border: 1px solid #6F2232; border-radius: 8px; padding: 10px; font-weight: bold; font-size: 16px; text-align: left;");
+    cardBtn->setCursor(Qt::PointingHandCursor);
+    cardBtn->setFixedWidth(200);
+    cardBtn->setFixedHeight(200);
+    cardBtn->setMinimumHeight(80);
+    historyLayout->addWidget(cardBtn);
+
+    connect(cardBtn, &QPushButton::clicked, this, [=]() {
+        // Show dialog with all survey entries for this goal
+        QList<SurveyResult> results = survey->getSurveyResultsForGoal(goalId);
+        QDialog dlg(this);
+        dlg.setWindowTitle("Survey Entries for " + goalText);
+        dlg.resize(600, 500);
+        QVBoxLayout *dlgLayout = new QVBoxLayout(&dlg);
+        QListWidget *entryList = new QListWidget();
+        for (const SurveyResult &res : results) {
+            QString summary = res.timestamp.toString("yyyy-MM-dd hh:mm") + " | Mood: " + res.moodEmoji + " | Satisfaction: " + QString::number(res.sessionSatisfaction) + "★";
+            QListWidgetItem *item = new QListWidgetItem(summary);
+            item->setData(Qt::UserRole, res.timestamp.toString(Qt::ISODate));
+            entryList->addItem(item);
+        }
+        dlgLayout->addWidget(entryList);
+        QPushButton *editBtn = new QPushButton("Edit Selected Entry");
+        QPushButton *deleteBtn = new QPushButton("Delete Selected Entry");
+        QPushButton *exportBtn = new QPushButton("Export All Entries");
+        QHBoxLayout *btnLayout = new QHBoxLayout();
+        btnLayout->addWidget(editBtn);
+        btnLayout->addWidget(deleteBtn);
+        btnLayout->addWidget(exportBtn);
+        dlgLayout->addLayout(btnLayout);
+
+        connect(editBtn, &QPushButton::clicked, this, [this, entryList, survey, goalId, cardBtn, historyLayout, historyWidget, &dlg, &results]() {
+            QListWidgetItem *item = entryList->currentItem();
+            if (!item) return;
+            QString ts = item->data(Qt::UserRole).toString();
+            // Find the entry
+            SurveyResult res;
+            for (const SurveyResult &r : results) {
+                if (r.timestamp.toString(Qt::ISODate) == ts) { res = r; break; }
+            }
+            // Show edit dialog
+            QDialog editDlg(&dlg);
+            editDlg.setWindowTitle("Edit Survey Entry");
+            QVBoxLayout *editLayout = new QVBoxLayout(&editDlg);
+            // Mood
+            QLineEdit *moodEdit = new QLineEdit(res.moodEmoji);
+            editLayout->addWidget(new QLabel("Mood(s):"));
+            editLayout->addWidget(moodEdit);
+            // Distraction Level
+            QSlider *distrSlider = new QSlider(Qt::Horizontal);
+            distrSlider->setRange(0, 100);
+            distrSlider->setValue(res.distractionLevel);
+            editLayout->addWidget(new QLabel("Distraction Level:"));
+            editLayout->addWidget(distrSlider);
+            // Distractions
+            QLineEdit *distrEdit = new QLineEdit(res.distractions.join(", "));
+            editLayout->addWidget(new QLabel("Distractions (comma separated):"));
+            editLayout->addWidget(distrEdit);
+            // Satisfaction
+            QSpinBox *satisSpin = new QSpinBox();
+            satisSpin->setRange(1, 5);
+            satisSpin->setValue(res.sessionSatisfaction);
+            editLayout->addWidget(new QLabel("Session Satisfaction (stars):"));
+            editLayout->addWidget(satisSpin);
+            // Goal Achieved
+            QComboBox *achCombo = new QComboBox();
+            achCombo->addItems({"Yes", "No", "Partial"});
+            achCombo->setCurrentText(res.goalAchieved);
+            editLayout->addWidget(new QLabel("Goal Achieved:"));
+            editLayout->addWidget(achCombo);
+            // Feedback
+            QTextEdit *fbEdit = new QTextEdit(res.openFeedback);
+            editLayout->addWidget(new QLabel("Feedback/Notes:"));
+            editLayout->addWidget(fbEdit);
+            // Reminder
+            QCheckBox *reminderBox = new QCheckBox("Set Reminder");
+            reminderBox->setChecked(res.setReminder);
+            editLayout->addWidget(reminderBox);
+            QPushButton *saveEditBtn = new QPushButton("Save Changes");
+            editLayout->addWidget(saveEditBtn);
+            connect(saveEditBtn, &QPushButton::clicked, this, [this, &editDlg, survey, &res, moodEdit, distrSlider, distrEdit, satisSpin, achCombo, fbEdit, reminderBox, entryList]() {
+                SurveyResult updated = res;
+                updated.moodEmoji = moodEdit->text();
+                updated.distractionLevel = distrSlider->value();
+                updated.distractions = distrEdit->text().split(", ", Qt::SkipEmptyParts);
+                updated.sessionSatisfaction = satisSpin->value();
+                updated.goalAchieved = achCombo->currentText();
+                updated.openFeedback = fbEdit->toPlainText();
+                updated.setReminder = reminderBox->isChecked();
+                survey->deleteSurveyResult(updated.goalId, updated.timestamp);
+                survey->saveSurveyResult(updated);
+                editDlg.accept();
+                // Refresh the entry list in the dialog
+                entryList->clear();
+                QList<SurveyResult> refreshed = survey->getSurveyResultsForGoal(updated.goalId);
+                for (const SurveyResult &r : refreshed) {
+                    QString summary = r.timestamp.toString("yyyy-MM-dd hh:mm") + " | Mood: " + r.moodEmoji + " | Satisfaction: " + QString::number(r.sessionSatisfaction) + "★";
+                    QListWidgetItem *item = new QListWidgetItem(summary);
+                    item->setData(Qt::UserRole, r.timestamp.toString(Qt::ISODate));
+                    entryList->addItem(item);
+                }
+            });
+            editDlg.exec();
+        });
+        connect(deleteBtn, &QPushButton::clicked, this, [this, entryList, survey, goalId, cardBtn, historyLayout, historyWidget, &dlg, &results]() {
+            QListWidgetItem *item = entryList->currentItem();
+            if (!item) return;
+            QString ts = item->data(Qt::UserRole).toString();
+            // Find the entry
+            SurveyResult res;
+            for (const SurveyResult &r : results) {
+                if (r.timestamp.toString(Qt::ISODate) == ts) { res = r; break; }
+            }
+            if (QMessageBox::question(this, "Delete Entry", "Are you sure you want to delete this survey entry?", QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+                survey->deleteSurveyResult(res.goalId, res.timestamp);
+                // Remove from UI
+                delete item;
+                // If no more entries, remove the goal card from history
+                if (entryList->count() == 0) {
+                    historyLayout->removeWidget(cardBtn);
+                    cardBtn->deleteLater();
+                    dlg.accept(); // Close the dialog
+                }
+            }
+        });
+        connect(exportBtn, &QPushButton::clicked, this, [this, &results, goalText]() {
+            QString fileName = QFileDialog::getSaveFileName(this, "Export Survey Entries", goalText + ".csv", "CSV Files (*.csv)");
+            if (fileName.isEmpty()) return;
+            QFile file(fileName);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QMessageBox::critical(this, "Error", "Could not open file for writing.");
+                return;
+            }
+            QTextStream out(&file);
+            out << "Timestamp,Mood,Distraction Level,Distractions,Session Satisfaction,Goal Achieved,Feedback,Set Reminder\n";
+            for (const SurveyResult &res : results) {
+                QString mood = res.moodEmoji;
+                mood.replace('"', "''");
+                QString distractions = res.distractions.join("; ");
+                distractions.replace('"', "''");
+                QString achieved = res.goalAchieved;
+                achieved.replace('"', "''");
+                QString feedback = res.openFeedback;
+                feedback.replace('"', "''");
+                out << res.timestamp.toString(Qt::ISODate) << ","
+                    << '"' << mood << '"' << ","
+                    << res.distractionLevel << ","
+                    << '"' << distractions << '"' << ","
+                    << res.sessionSatisfaction << ","
+                    << '"' << achieved << '"' << ","
+                    << '"' << feedback << '"' << ","
+                    << (res.setReminder ? "Yes" : "No") << "\n";
+            }
+            file.close();
+            QMessageBox::information(this, "Export Complete", "Survey entries exported to " + fileName);
+        });
+        dlg.exec();
+    });
+}
+historyLayout->addStretch();
+historyScroll->setWidget(historyWidget);
+historyScroll->setFixedHeight(300);
+layout->addWidget(historyScroll);
+    scrollArea->setWidget(formWidget);
+    mainLayout->addWidget(scrollArea);
+    tabWidget->addTab(surveysTab, "Surveys");
+}
+
+void MainWindow::openResourceInApp(const QString &res) {
+    QDialog *dlg = new QDialog(this);
+    dlg->setWindowTitle("Resource Viewer");
+    dlg->resize(900, 700);
+    QVBoxLayout *layout = new QVBoxLayout(dlg);
+
+    if (res.startsWith("http", Qt::CaseInsensitive)) {
+        // Use WebEngine for web links
+        QWebEngineView *view = new QWebEngineView(dlg);
+        view->setUrl(QUrl(res));
+        layout->addWidget(view);
+    } else if (res.endsWith(".pdf", Qt::CaseInsensitive)) {
+        // Use QPdfView for local PDFs
+        QPdfDocument *pdfDoc = new QPdfDocument(dlg);
+        if (pdfDoc->load(res) == QPdfDocument::Error::None) {
+            QPdfView *pdfView = new QPdfView(dlg);
+            pdfView->setDocument(pdfDoc);
+            layout->addWidget(pdfView);
+        } else {
+            QMessageBox::warning(this, "PDF Error", "Failed to load PDF file.");
+            delete pdfDoc;
+            dlg->deleteLater();
+            return;
+        }
+    } else {
+        QMessageBox::information(this, "Open Resource", "This file type is not supported for in-app viewing. It will be opened externally.");
+        QDesktopServices::openUrl(QUrl::fromLocalFile(res));
+        dlg->deleteLater();
+        return;
+    }
+    dlg->exec();
+}
+
+void MainWindow::createBuddyChatTab() {
+    QWidget *buddyTab = new QWidget();
+    QHBoxLayout *mainLayout = new QHBoxLayout(buddyTab);
+
+    // Splitter for chat (left) and conversation list (right)
+    QSplitter *splitter = new QSplitter(Qt::Horizontal, buddyTab);
+    QWidget *chatWidget = new QWidget();
+    QVBoxLayout *chatLayout = new QVBoxLayout(chatWidget);
+    buddyChatList = new QListWidget(chatWidget);
+    buddyChatList->setSelectionMode(QAbstractItemView::NoSelection);
+    buddyChatList->setFocusPolicy(Qt::NoFocus);
+    buddyChatList->setStyleSheet("QListWidget { background: #222; color: #fff; border: none; } QListWidget::item { border-radius: 8px; margin: 4px; padding: 8px; }");
+    chatLayout->addWidget(buddyChatList, 1);
+    QHBoxLayout *inputLayout = new QHBoxLayout();
+    buddyAttachButton = new QPushButton(QIcon::fromTheme("document-open", QIcon(":/icons/app_icon.svg")), "", chatWidget);
+    buddyAttachButton->setToolTip("Attach image");
+    buddySpeakerButton = new QPushButton(QIcon::fromTheme("media-playback-start", QIcon()), "", chatWidget);
+    buddySpeakerButton->setToolTip("Read aloud");
+    buddyChatInput = new QLineEdit(chatWidget);
+    buddyChatInput->setPlaceholderText("Type your message...");
+    buddyChatSendButton = new QPushButton("Send", chatWidget);
+    inputLayout->addWidget(buddyAttachButton);
+    inputLayout->addWidget(buddySpeakerButton);
+    inputLayout->addWidget(buddyChatInput, 1);
+    inputLayout->addWidget(buddyChatSendButton);
+    chatLayout->addLayout(inputLayout);
+    // Prompt suggestions row
+    QHBoxLayout *promptLayout = new QHBoxLayout();
+    QStringList prompts = {"Summarize my notes", "Quiz me", "Give me a study plan", "Motivate me", "Explain this concept"};
+    buddyPromptButtons.clear();
+    for (const QString& prompt : prompts) {
+        QPushButton* btn = new QPushButton(prompt, chatWidget);
+        btn->setStyleSheet("background: #444; color: rgb(230, 223, 186); border-radius: 8px; padding: 4px 10px; font-weight: bold;");
+        connect(btn, &QPushButton::clicked, this, [this, prompt]() {
+            buddyChatInput->setText(prompt);
+            buddyChatInput->setFocus();
+        });
+        promptLayout->addWidget(btn);
+        buddyPromptButtons.append(btn);
+    }
+    chatLayout->addLayout(promptLayout);
+    chatWidget->setLayout(chatLayout);
+
+    // Conversation list panel
+    QWidget *convWidget = new QWidget();
+    QVBoxLayout *convLayout = new QVBoxLayout(convWidget);
+    // Search bar
+    buddyConversationSearch = new QLineEdit(convWidget);
+    buddyConversationSearch->setPlaceholderText("Search conversations...");
+    convLayout->addWidget(buddyConversationSearch);
+    buddyNewConversationButton = new QPushButton("New Conversation", convWidget);
+    buddyDeleteConversationButton = new QPushButton("Delete Conversation", convWidget);
+    buddyConversationList = new QListWidget(convWidget);
+    convLayout->addWidget(buddyNewConversationButton);
+    convLayout->addWidget(buddyDeleteConversationButton);
+    convLayout->addWidget(buddyConversationList, 1);
+    convWidget->setLayout(convLayout);
+
+    splitter->addWidget(chatWidget);
+    splitter->addWidget(convWidget);
+    splitter->setStretchFactor(0, 3);
+    splitter->setStretchFactor(1, 1);
+    mainLayout->addWidget(splitter);
+    buddyTab->setLayout(mainLayout);
+    tabWidget->addTab(buddyTab, "Buddy");
+
+    // Load conversations from disk
+    loadBuddyConversations();
+    // Populate conversation list
+    buddyConversationList->clear();
+    for (const auto& conv : buddyConversations) {
+        buddyConversationList->addItem(conv.title);
+    }
+    // If no conversations, start a new one
+    if (buddyConversations.isEmpty()) {
+        startNewBuddyConversation();
+    } else {
+        switchBuddyConversation(0);
+    }
+
+    connect(buddyChatSendButton, &QPushButton::clicked, this, &MainWindow::handleBuddyChatSend);
+    connect(buddyChatInput, &QLineEdit::returnPressed, this, &MainWindow::handleBuddyChatSend);
+    connect(buddyNewConversationButton, &QPushButton::clicked, this, &MainWindow::startNewBuddyConversation);
+    connect(buddyDeleteConversationButton, &QPushButton::clicked, this, [this]() {
+        if (currentConversationIndex >= 0 && currentConversationIndex < buddyConversations.size()) {
+            deleteBuddyConversation(currentConversationIndex);
+        }
+    });
+    connect(buddyConversationList, &QListWidget::currentRowChanged, this, &MainWindow::switchBuddyConversation);
+    // Conversation renaming on double-click
+    connect(buddyConversationList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        int idx = buddyConversationList->row(item);
+        if (idx < 0 || idx >= buddyConversations.size()) return;
+        bool ok = false;
+        QString newTitle = QInputDialog::getText(this, "Rename Conversation", "New title:", QLineEdit::Normal, buddyConversations[idx].title, &ok);
+        if (ok && !newTitle.trimmed().isEmpty()) {
+            buddyConversations[idx].title = newTitle.trimmed();
+            item->setText(newTitle.trimmed());
+            saveBuddyConversations();
+        }
+    });
+    // Conversation search
+    connect(buddyConversationSearch, &QLineEdit::textChanged, this, &MainWindow::filterBuddyConversations);
+    connect(buddyAttachButton, &QPushButton::clicked, this, &MainWindow::handleBuddyAttach);
+    connect(buddySpeakerButton, &QPushButton::clicked, this, [this]() {
+        // Read last Buddy message aloud
+        if (currentConversationIndex >= 0 && currentConversationIndex < buddyConversations.size()) {
+            for (int i = buddyConversations[currentConversationIndex].messages.size() - 1; i >= 0; --i) {
+                if (buddyConversations[currentConversationIndex].messages[i].first == "model") {
+                    handleBuddySpeaker(buddyConversations[currentConversationIndex].messages[i].second);
+                    break;
+                }
+            }
+        }
+    });
+}
+
+void MainWindow::filterBuddyConversations(const QString& text) {
+    buddyConversationSearchText = text.trimmed();
+    buddyConversationList->clear();
+    for (int i = 0; i < buddyConversations.size(); ++i) {
+        const auto& conv = buddyConversations[i];
+        bool match = conv.title.contains(buddyConversationSearchText, Qt::CaseInsensitive);
+        if (!match) {
+            for (const auto& msg : conv.messages) {
+                if (msg.second.contains(buddyConversationSearchText, Qt::CaseInsensitive)) {
+                    match = true;
+                    break;
+                }
+            }
+        }
+        if (match) {
+            buddyConversationList->addItem(conv.title);
+        }
+    }
+    // Optionally, reset selection if current is filtered out
+    if (buddyConversationList->count() > 0) {
+        buddyConversationList->setCurrentRow(0);
+    }
+}
+
+void MainWindow::loadBuddyConversations() {
+    buddyConversations.clear();
+    QFile file(QCoreApplication::applicationDirPath() + "/buddy_conversations.json");
+    if (!file.open(QIODevice::ReadOnly)) return;
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    if (!doc.isArray()) return;
+    QJsonArray arr = doc.array();
+    for (const QJsonValue& v : arr) {
+        QJsonObject obj = v.toObject();
+        Conversation conv;
+        conv.id = obj["id"].toString();
+        conv.title = obj["title"].toString();
+        conv.timestamp = QDateTime::fromString(obj["timestamp"].toString(), Qt::ISODate);
+        QJsonArray msgs = obj["messages"].toArray();
+        for (const QJsonValue& mv : msgs) {
+            QJsonObject mobj = mv.toObject();
+            conv.messages.append({mobj["role"].toString(), mobj["text"].toString()});
+        }
+        buddyConversations.append(conv);
+    }
+}
+
+void MainWindow::saveBuddyConversations() {
+    QJsonArray arr;
+    for (const auto& conv : buddyConversations) {
+        QJsonObject obj;
+        obj["id"] = conv.id;
+        obj["title"] = conv.title;
+        obj["timestamp"] = conv.timestamp.toString(Qt::ISODate);
+        QJsonArray msgs;
+        for (const auto& msg : conv.messages) {
+            QJsonObject mobj;
+            mobj["role"] = msg.first;
+            mobj["text"] = msg.second;
+            msgs.append(mobj);
+        }
+        obj["messages"] = msgs;
+        arr.append(obj);
+    }
+    QFile file(QCoreApplication::applicationDirPath() + "/buddy_conversations.json");
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(QJsonDocument(arr).toJson());
+        file.close();
+    }
+}
+
+void MainWindow::startNewBuddyConversation() {
+    Conversation conv;
+    conv.id = QString::number(QDateTime::currentMSecsSinceEpoch());
+    conv.title = "Conversation " + QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm");
+    conv.timestamp = QDateTime::currentDateTime();
+    conv.messages.clear();
+    conv.messages.append(QPair<QString, QString>("model", "Hi! I'm your Study Buddy. How can I help you today?"));
+    buddyConversations.prepend(conv);
+    currentConversationIndex = 0;
+    // Update UI
+    buddyConversationList->insertItem(0, conv.title);
+    buddyConversationList->setCurrentRow(0);
+    switchBuddyConversation(0);
+    saveBuddyConversations();
+}
+
+// Helper to add a Markdown message to the chat
+static void addMarkdownMessage(QListWidget* list, const QString& text, bool isBuddy) {
+    QWidget* widget = new QWidget();
+    QHBoxLayout* layout = new QHBoxLayout(widget);
+    QTextEdit* label = new QTextEdit();
+    label->setReadOnly(true);
+    label->setMarkdown(text); 
+    label->setStyleSheet(isBuddy ? "color:rgb(230, 223, 186); font-weight: bold;" : "color: #C5C6C7;");
+    label->setFrameStyle(QFrame::NoFrame);
+    label->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    label->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    label->setStyleSheet(isBuddy ? "color:rgb(230, 223, 186); font-weight: bold;" : "color: #C5C6C7;");
+    layout->addWidget(label);
+    layout->setContentsMargins(0,0,0,0);
+    widget->setLayout(layout);
+    QListWidgetItem* item = new QListWidgetItem(list);
+    item->setSizeHint(widget->sizeHint());
+    list->setItemWidget(item, widget);
+}
+
+void MainWindow::switchBuddyConversation(int index) {
+    if (index < 0 || index >= buddyConversations.size()) return;
+    currentConversationIndex = index;
+    buddyChatList->clear();
+    for (const auto& msg : buddyConversations[index].messages) {
+        if (msg.first == "user")
+            addMarkdownMessage(buddyChatList, "You: " + msg.second, false);
+        else
+            addMarkdownMessage(buddyChatList, "🧑‍🎓 Buddy: " + msg.second, true);
+    }
+}
+
+void MainWindow::deleteBuddyConversation(int index) {
+    if (index < 0 || index >= buddyConversations.size()) return;
+    buddyConversations.removeAt(index);
+    buddyConversationList->takeItem(index);
+    if (buddyConversations.isEmpty()) {
+        startNewBuddyConversation();
+    } else {
+        int newIndex = qMin(index, buddyConversations.size() - 1);
+        buddyConversationList->setCurrentRow(newIndex);
+        switchBuddyConversation(newIndex);
+    }
+    saveBuddyConversations();
+}
+
+void MainWindow::handleBuddyChatSend() {
+    if (currentConversationIndex < 0 || currentConversationIndex >= buddyConversations.size()) return;
+    QString userMsg = buddyChatInput->text().trimmed();
+    if (userMsg.isEmpty() && buddyPendingImagePath.isEmpty()) return;
+    QString displayMsg = userMsg;
+    if (!buddyPendingImagePath.isEmpty()) displayMsg = "[Image attached] " + displayMsg;
+    addMarkdownMessage(buddyChatList, "You: " + displayMsg, false);
+    buddyChatInput->clear();
+
+    // Add user message to current conversation
+    buddyConversations[currentConversationIndex].messages.append(QPair<QString, QString>("user", displayMsg));
+    while (buddyConversations[currentConversationIndex].messages.size() > 20) buddyConversations[currentConversationIndex].messages.removeFirst();
+    saveBuddyConversations();
+
+    // Prepare Gemini API request with context (NO system role)
+    QUrl url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=" + GEMINI_API_KEY);
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    // Add system prompt as a user message at the start
+    QJsonArray contents;
+    contents.append(QJsonObject{
+        {"role", "user"},
+        {"parts", QJsonArray{ QJsonObject{{"text", "You are Study Buddy, a friendly, encouraging AI study assistant for students. Be supportive, concise, and motivational."}} }}
+    });
+    // Inject current goals as a user message
+    QList<GoalInfo> buddyGoals = studyGoal->getGoalsForDate(QDate::currentDate());
+    if (!buddyGoals.isEmpty()) {
+        QStringList goalSummaries;
+        for (const auto& g : buddyGoals) {
+            goalSummaries << QString("- %1 (%2/%3 min, %4)").arg(g.subject).arg(g.completedMinutes).arg(g.targetMinutes).arg(g.category);
+        }
+        QString goalsText = QString("Here are my current study goals for today:\n%1").arg(goalSummaries.join("\n"));
+        contents.append(QJsonObject{
+            {"role", "user"},
+            {"parts", QJsonArray{ QJsonObject{{"text", goalsText}} }}
+        });
+    }
+    for (const auto& pair : buddyConversations[currentConversationIndex].messages) {
+        QJsonObject msgObj;
+        msgObj["role"] = pair.first;
+        QJsonArray parts;
+        // If this is the current user message and an image is attached, add both text and image parts
+        if (pair.first == "user" && !buddyPendingImagePath.isEmpty() && pair.second == displayMsg) {
+            if (!userMsg.isEmpty()) parts.append(QJsonObject{{"text", userMsg}});
+            // Read image and encode as base64
+            QImage img(buddyPendingImagePath);
+            if (!img.isNull()) {
+                QByteArray ba;
+                QBuffer buf(&ba);
+                img.save(&buf, "PNG");
+                QString b64 = QString::fromLatin1(ba.toBase64());
+                QJsonObject imgPart;
+                imgPart["inlineData"] = QJsonObject{
+                    {"mimeType", "image/png"},
+                    {"data", b64}
+                };
+                parts.append(imgPart);
+            }
+        } else {
+            parts.append(QJsonObject{{"text", pair.second}});
+        }
+        msgObj["parts"] = parts;
+        contents.append(msgObj);
+    }
+    QJsonObject reqObj;
+    reqObj["contents"] = contents;
+
+    QJsonDocument doc(reqObj);
+    QByteArray data = doc.toJson();
+
+    // Add typing indicator
+    QListWidgetItem* typingItem = new QListWidgetItem(buddyChatList);
+    QWidget* typingWidget = new QWidget();
+    QHBoxLayout* typingLayout = new QHBoxLayout(typingWidget);
+    QLabel* typingLabel = new QLabel("🧑‍🎓 Buddy is typing...");
+    typingLayout->addWidget(typingLabel);
+    typingLayout->setContentsMargins(0,0,0,0);
+    typingWidget->setLayout(typingLayout);
+    typingItem->setSizeHint(typingWidget->sizeHint());
+    buddyChatList->setItemWidget(typingItem, typingWidget);
+    buddyChatList->scrollToBottom();
+
+    // Send POST request
+    QNetworkReply* reply = geminiNetworkManager->post(request, data);
+
+    // Handle the reply asynchronously
+    connect(reply, &QNetworkReply::finished, this, [this, reply, typingItem]() {
+        QByteArray response = reply->readAll();
+        reply->deleteLater();
+
+        // Remove typing indicator
+        int row = buddyChatList->row(typingItem);
+        if (row >= 0) buddyChatList->takeItem(row);
+        delete typingItem;
+
+        QJsonDocument jsonDoc = QJsonDocument::fromJson(response);
+        QString buddyReply = "Sorry, I couldn't get a response from Gemini.";
+        if (jsonDoc.isObject()) {
+            QJsonObject obj = jsonDoc.object();
+            if (obj.contains("candidates")) {
+                QJsonArray candidates = obj["candidates"].toArray();
+                if (!candidates.isEmpty()) {
+                    QJsonObject cand = candidates[0].toObject();
+                    if (cand.contains("content")) {
+                        QJsonObject content = cand["content"].toObject();
+                        if (content.contains("parts")) {
+                            QJsonArray parts = content["parts"].toArray();
+                            if (!parts.isEmpty()) {
+                                QJsonObject part = parts[0].toObject();
+                                buddyReply = part.value("text").toString();
+                            }
+                        }
+                    }
+                }
+            } else if (obj.contains("error")) {
+                buddyReply = "Gemini API error: " + obj["error"].toObject().value("message").toString();
+            }
+        }
+        // Add Buddy reply to current conversation
+        if (currentConversationIndex >= 0 && currentConversationIndex < buddyConversations.size()) {
+            buddyConversations[currentConversationIndex].messages.append(QPair<QString, QString>("model", buddyReply));
+            while (buddyConversations[currentConversationIndex].messages.size() > 20) buddyConversations[currentConversationIndex].messages.removeFirst();
+            saveBuddyConversations();
+        }
+        addMarkdownMessage(buddyChatList, "🧑‍🎓 Buddy: " + buddyReply, true);
+        buddyChatList->scrollToBottom();
+        buddyPendingImagePath.clear();
+        buddyChatInput->setPlaceholderText("Type your message...");
+    });
+}
+
+void MainWindow::handleBuddyAttach() {
+    QString file = QFileDialog::getOpenFileName(this, "Attach Image", QString(), "Images (*.png *.jpg *.jpeg *.bmp *.gif)");
+    if (!file.isEmpty()) {
+        buddyPendingImagePath = file;
+        buddyChatInput->setPlaceholderText("Image attached. Type your message...");
+    }
+}
+
+void MainWindow::handleBuddySpeaker(const QString &text) {
+#ifdef Q_OS_WIN
+    QAxObject voice("SAPI.SpVoice");
+    voice.dynamicCall("Speak(const QString&)", text);
+#else
+    QMessageBox::information(this, "Text-to-Speech", "Text-to-speech is only supported on Windows with QtAxContainer.");
+#endif
+}
+
+void MainWindow::notifyOverdueAndTodayGoals() {
+    if (!trayIcon || !QSystemTrayIcon::supportsMessages()) return;
+    QDate today = QDate::currentDate();
+    // Query all active goals
+    QList<GoalInfo> allGoals = studyGoal->getGoalsForDate(QDate(2000,1,1)); // Use a very early date to get all active goals
+    QStringList overdue, dueToday;
+    for (const auto& goal : allGoals) {
+        QDate due = goal.dueDate.isEmpty() ? QDate() : QDate::fromString(goal.dueDate, Qt::ISODate);
+        QDate start = goal.startDate.isEmpty() ? QDate() : QDate::fromString(goal.startDate, Qt::ISODate);
+        if (goal.status != "Completed") {
+            if (!due.isNull() && due < today) overdue << goal.subject;
+            else if ((start == today) || (!due.isNull() && due == today)) dueToday << goal.subject;
+        }
+    }
+    if (!overdue.isEmpty()) {
+        trayIcon->showMessage(tr("Overdue Goals"), tr("You have overdue goals: %1").arg(overdue.join(", ")), QSystemTrayIcon::Warning, 5000);
+    }
+    if (!dueToday.isEmpty()) {
+        trayIcon->showMessage(tr("Today's Goals"), tr("Goals due today: %1").arg(dueToday.join(", ")), QSystemTrayIcon::Information, 5000);
+    }
+}
+
+void MainWindow::createCalendarTab() {
+    QWidget *calendarTab = new QWidget();
+    QVBoxLayout *layout = new QVBoxLayout(calendarTab);
+    calendarWidget = new QCalendarWidget(calendarTab);
+    calendarWidget->setGridVisible(true);
+    calendarWidget->setLocale(QLocale(QLocale::English, QLocale::UnitedStates));
+    QTextCharFormat todayFormat;
+    todayFormat.setForeground(Qt::red);
+    calendarWidget->setDateTextFormat(QDate::currentDate(), todayFormat);
+    calendarWidget->setStyleSheet(R"(
+        QCalendarWidget QAbstractItemView {
+            background-color: #1A1A1D;
+            selection-background-color: #6F2232;
+            selection-color: #fff;
+            border: 1px solid  #6F2232;
+            color: #C5C6C7;
+            gridline-color: #6F2232;
+        }
+        QCalendarWidget QWidget#qt_calendar_navigationbar {
+            background-color: #6F2232;
+            color: #fff;
+        }
+        QCalendarWidget QToolButton {
+            background-color: #6F2232;
+            color: #fff;
+            border-radius: 4px;
+            margin: 2px;
+            padding: 2px 8px;
+        }
+        QCalendarWidget QToolButton:hover {
+            background-color: #950740;
+        }
+        QCalendarWidget QSpinBox {
+            background: #222;
+            color: #fff;
+            border: 1px solid #6F2232;
+        }
+    )");
+    layout->addWidget(calendarWidget);
+    QPushButton *addGoalBtn = new QPushButton("+ Add Goal");
+    layout->addWidget(addGoalBtn);
+    calendarGoalsList = new QListWidget(calendarTab);
+    layout->addWidget(calendarGoalsList);
+    tabWidget->addTab(calendarTab, "Calendar");
+    connect(calendarWidget, &QCalendarWidget::activated, this, [this](const QDate& date) {
+        openDayPlannerDialog(date);
+    });
+    // Update goals list when date is selected
+    auto refreshGoalsList = [this]() {
+        QDate date = calendarWidget->selectedDate();
+        calendarGoalsList->clear();
+        QList<GoalInfo> goals = studyGoal->getGoalsForDate(date);
+        QString dayName = date.toString("ddd");
+        for (const auto& goal : goals) {
+            if (goal.recurrenceType == "Weekly" && !goal.recurrenceValue.isEmpty()) {
+                QStringList recurDays = goal.recurrenceValue.split(",", Qt::SkipEmptyParts);
+                if (!recurDays.contains(dayName)) continue;
+            }
+            QString status = (goal.completedMinutes >= goal.targetMinutes && goal.targetMinutes > 0) ? "[Completed]" : "[Active]";
+            QListWidgetItem *item = new QListWidgetItem(QString("%1 %2").arg(goal.subject, status));
+            item->setData(Qt::UserRole, goal.id);
+            calendarGoalsList->addItem(item);
+        }
+        if (calendarGoalsList->count() == 0) {
+            calendarGoalsList->addItem("No goals for this date.");
+        }
+    };
+    connect(calendarWidget, &QCalendarWidget::selectionChanged, this, refreshGoalsList);
+    // Show today's goals by default
+    calendarWidget->setSelectedDate(QDate::currentDate());
+    emit calendarWidget->selectionChanged();
+    // Add Goal button logic
+    connect(addGoalBtn, &QPushButton::clicked, this, [this, refreshGoalsList]() {
+        QDate date = calendarWidget->selectedDate();
+        QDialog dlg(this);
+        dlg.setWindowTitle("Add Goal");
+        QFormLayout *form = new QFormLayout(&dlg);
+        QLineEdit *subjectEdit = new QLineEdit();
+        QSpinBox *minutesEdit = new QSpinBox(); minutesEdit->setRange(1, 1000);
+        QTextEdit *notesEdit = new QTextEdit();
+        QComboBox *recurrenceTypeCombo = new QComboBox();
+        recurrenceTypeCombo->addItems({"None", "Daily", "Weekly", "Monthly"});
+        QWidget *recurrenceValueWidget = new QWidget();
+        QHBoxLayout *recurrenceValueLayout = new QHBoxLayout(recurrenceValueWidget);
+        recurrenceValueLayout->setContentsMargins(0,0,0,0);
+        // For weekly: checkboxes for days
+        QList<QCheckBox*> weekDayChecks;
+        QStringList weekDays = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+        for (const QString& day : weekDays) {
+            QCheckBox *cb = new QCheckBox(day);
+            cb->setEnabled(false);
+            recurrenceValueLayout->addWidget(cb);
+            weekDayChecks.append(cb);
+        }
+        // Enable checkboxes only for Weekly
+        connect(recurrenceTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [&](int idx){
+            bool isWeekly = (recurrenceTypeCombo->currentText() == "Weekly");
+            for (QCheckBox *cb : weekDayChecks) cb->setEnabled(isWeekly);
+        });
+        form->addRow("Subject:", subjectEdit);
+        form->addRow("Target Minutes:", minutesEdit);
+        form->addRow("Notes:", notesEdit);
+        form->addRow("Recurrence:", recurrenceTypeCombo);
+        form->addRow("Recurrence Details:", recurrenceValueWidget);
+        QLabel *dateLabel = new QLabel(date.toString("yyyy-MM-dd"));
+        form->addRow("Date:", dateLabel);
+        QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        form->addRow(box);
+        connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        if (dlg.exec() == QDialog::Accepted) {
+            QString recurrenceType = recurrenceTypeCombo->currentText();
+            QString recurrenceValue;
+            if (recurrenceType == "Weekly") {
+                QStringList days;
+                for (QCheckBox *cb : weekDayChecks) if (cb->isChecked()) days << cb->text();
+                recurrenceValue = days.join(",");
+            }
+            studyGoal->createGoal(subjectEdit->text(), minutesEdit->value(), notesEdit->toPlainText(), recurrenceType, recurrenceValue, "Uncategorized", QStringList());
+            refreshGoalsList();
+        }
+    });
+    // Edit goal on double-click
+    connect(calendarGoalsList, &QListWidget::itemDoubleClicked, this, [this, refreshGoalsList](QListWidgetItem *item) {
+        if (!item->data(Qt::UserRole).isValid()) return;
+        int goalId = item->data(Qt::UserRole).toInt();
+        QMap<QString, QVariant> details = studyGoal->getGoalDetails(goalId);
+        QDialog dlg(this);
+        dlg.setWindowTitle("Edit Goal");
+        QFormLayout *form = new QFormLayout(&dlg);
+        QLineEdit *subjectEdit = new QLineEdit(details["subject"].toString());
+        QSpinBox *minutesEdit = new QSpinBox(); minutesEdit->setRange(1, 1000); minutesEdit->setValue(details["target_minutes"].toInt());
+        QTextEdit *notesEdit = new QTextEdit(details["notes"].toString());
+        QComboBox *recurrenceTypeCombo = new QComboBox();
+        recurrenceTypeCombo->addItems({"None", "Daily", "Weekly", "Monthly"});
+        QWidget *recurrenceValueWidget = new QWidget();
+        QHBoxLayout *recurrenceValueLayout = new QHBoxLayout(recurrenceValueWidget);
+        recurrenceValueLayout->setContentsMargins(0,0,0,0);
+        QList<QCheckBox*> weekDayChecks;
+        QStringList weekDays = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+        for (const QString& day : weekDays) {
+            QCheckBox *cb = new QCheckBox(day);
+            cb->setEnabled(false);
+            recurrenceValueLayout->addWidget(cb);
+            weekDayChecks.append(cb);
+        }
+        // Set initial recurrence type and value
+        int idx = recurrenceTypeCombo->findText(details["recurrence_type"].toString());
+        if (idx >= 0) recurrenceTypeCombo->setCurrentIndex(idx);
+        if (details["recurrence_type"].toString() == "Weekly") {
+            QStringList recurDays = details["recurrence_value"].toString().split(",", Qt::SkipEmptyParts);
+            for (QCheckBox *cb : weekDayChecks) {
+                cb->setEnabled(true);
+                if (recurDays.contains(cb->text())) cb->setChecked(true);
+            }
+        }
+        connect(recurrenceTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [&](int idx){
+            bool isWeekly = (recurrenceTypeCombo->currentText() == "Weekly");
+            for (QCheckBox *cb : weekDayChecks) cb->setEnabled(isWeekly);
+        });
+        form->addRow("Subject:", subjectEdit);
+        form->addRow("Target Minutes:", minutesEdit);
+        form->addRow("Notes:", notesEdit);
+        form->addRow("Recurrence:", recurrenceTypeCombo);
+        form->addRow("Recurrence Details:", recurrenceValueWidget);
+        QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        form->addRow(box);
+        connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        if (dlg.exec() == QDialog::Accepted) {
+            QString recurrenceType = recurrenceTypeCombo->currentText();
+            QString recurrenceValue;
+            if (recurrenceType == "Weekly") {
+                QStringList days;
+                for (QCheckBox *cb : weekDayChecks) if (cb->isChecked()) days << cb->text();
+                recurrenceValue = days.join(",");
+            }
+            studyGoal->updateGoal(goalId, subjectEdit->text(), minutesEdit->value(), notesEdit->toPlainText(), recurrenceType, recurrenceValue, details["category"].toString(), QStringList());
+            refreshGoalsList();
+        }
+    });
+}
+void MainWindow::openDayPlannerDialog(const QDate& date) {
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString("Smart Planner for %1").arg(date.toString("yyyy-MM-dd")));
+    QVBoxLayout *mainLayout = new QVBoxLayout(&dlg);
+
+    struct Period { QString label; QString key; int start, end; };
+    QVector<Period> periods = {
+        {"🌞 Morning (06:00–12:00)", "morning", 6, 12},
+        {"🌇 Evening (12:00–18:00)", "evening", 12, 18},
+        {"🌙 Night (18:00–00:00)", "night", 18, 24}
+    };
+    QMap<QString, QSpinBox*> freeTimeInputs;
+    QMap<QString, int> loaded = loadFreeTimeForDate(date);
+    for (const auto& p : periods) {
+        QGroupBox *box = new QGroupBox(p.label);
+        QHBoxLayout *hl = new QHBoxLayout(box);
+        hl->addWidget(new QLabel("Free time (min):"));
+        QSpinBox *spin = new QSpinBox(); spin->setRange(0, 360); spin->setValue(loaded.value(p.key, 0));
+        hl->addWidget(spin);
+        freeTimeInputs[p.key] = spin;
+        mainLayout->addWidget(box);
+    }
+
+    QPushButton *generateBtn = new QPushButton("Generate Plan");
+    mainLayout->addWidget(generateBtn);
+    QTextEdit *planOutput = new QTextEdit();
+    planOutput->setReadOnly(true);
+    mainLayout->addWidget(planOutput);
+
+    // Save free time on change
+    auto saveFreeTime = [=]() {
+        saveFreeTimeForDate(date, freeTimeInputs["morning"]->value(), freeTimeInputs["evening"]->value(), freeTimeInputs["night"]->value());
+    };
+    for (auto spin : freeTimeInputs) connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), saveFreeTime);
+
+    // Generate plan logic
+    connect(generateBtn, &QPushButton::clicked, this, [=]() {
+        saveFreeTime();
+        int morningFree = freeTimeInputs["morning"]->value();
+        int eveningFree = freeTimeInputs["evening"]->value();
+        int nightFree = freeTimeInputs["night"]->value();
+        QList<GoalInfo> goals = studyGoal->getGoalsForDate(date);
+        QStringList plan;
+        int m = morningFree, e = eveningFree, n = nightFree;
+        for (const auto& goal : goals) {
+            int minutes = goal.targetMinutes - goal.completedMinutes;
+            if (minutes <= 0) continue;
+            int remaining = minutes;
+            QStringList assignedParts;
+            if (m > 0 && remaining > 0) {
+                int assign = qMin(m, remaining);
+                assignedParts << QString("Morning: %1 min").arg(assign);
+                m -= assign;
+                remaining -= assign;
+            }
+            if (e > 0 && remaining > 0) {
+                int assign = qMin(e, remaining);
+                assignedParts << QString("Evening: %1 min").arg(assign);
+                e -= assign;
+                remaining -= assign;
+            }
+            if (n > 0 && remaining > 0) {
+                int assign = qMin(n, remaining);
+                assignedParts << QString("Night: %1 min").arg(assign);
+                n -= assign;
+                remaining -= assign;
+            }
+            if (assignedParts.isEmpty()) {
+                plan << QString("%1: %2 min → Not enough free time").arg(goal.subject).arg(minutes);
+            } else {
+                plan << QString("%1: %2 min → %3%4")
+                    .arg(goal.subject)
+                    .arg(minutes)
+                    .arg(assignedParts.join(", "))
+                    .arg(remaining > 0 ? QString(", %1 min unscheduled").arg(remaining) : "");
+            }
+        }
+        planOutput->setText(plan.join("\n"));
+    });
+
+    dlg.exec();
+}
+
+QMap<QString, int> MainWindow::loadFreeTimeForDate(const QDate& date) {
+    QMap<QString, int> result;
+    QSqlQuery q(db);
+    q.prepare("SELECT morning_minutes, evening_minutes, night_minutes FROM free_time WHERE date = ?");
+    q.addBindValue(date.toString(Qt::ISODate));
+    if (q.exec() && q.next()) {
+        result["morning"] = q.value(0).toInt();
+        result["evening"] = q.value(1).toInt();
+        result["night"] = q.value(2).toInt();
+    } else {
+        result["morning"] = 0;
+        result["evening"] = 0;
+        result["night"] = 0;
+    }
+    return result;
+}
+void MainWindow::saveFreeTimeForDate(const QDate& date, int morning, int evening, int night) {
+    QSqlQuery q(db);
+    q.prepare("INSERT OR REPLACE INTO free_time (date, morning_minutes, evening_minutes, night_minutes) VALUES (?, ?, ?, ?)");
+    q.addBindValue(date.toString(Qt::ISODate));
+    q.addBindValue(morning);
+    q.addBindValue(evening);
+    q.addBindValue(night);
+    q.exec();
+}
+
+void MainWindow::createHelpTab()
+{
+    QWidget *helpTab = new QWidget();
+    QVBoxLayout *layout = new QVBoxLayout(helpTab);
+    QLabel *title = new QLabel("<h2>Help & FAQ</h2>");
+    layout->addWidget(title);
+    QTextEdit *faqText = new QTextEdit();
+    faqText->setReadOnly(true);
+    faqText->setHtml(R"(
+<h3>How do I create a new goal?</h3>
+<p>Go to the <b>Dashboard</b> tab and fill out the <b>Create New Goal</b> form at the top. Enter the subject, target minutes, notes, category, and (optionally) set recurrence. Click <b>Add Goal</b> to save it.</p>
+<h3>How do I add resources to a goal?</h3>
+<p>In the <b>Create New Goal</b> form, use the <b>Resources</b> section to paste a YouTube link, file path, or browse for a file. Click <b>Add Resource</b> to attach it to your goal. Double-click a resource to remove it.</p>
+<h3>How do I track a goal?</h3>
+<ul>
+<li><b>With Pomodoro Timer:</b> On the Dashboard, click <b>Start</b> on your goal card. The Pomodoro timer will begin tracking your session. Pause or stop as needed.</li>
+<li><b>With Camera Session:</b> Go to the <b>Webcam</b> tab, click <b>Start Session</b>, select your goal(s), and begin. The app will track your focus and session time using your webcam.</li>
+</ul>
+<h3>How do I edit or delete a goal?</h3>
+<p>On the Dashboard, click a goal card to edit its details. Click <b>Delete</b> to remove a goal.</p>
+<h3>How do I use the Calendar and Smart Planner?</h3>
+<ul>
+<li>Go to the <b>Calendar</b> tab to see your goals by date.</li>
+<li>Click a day to open the Smart Planner. Enter your free time for morning, evening, and night, then click <b>Generate Plan</b> to organize your goals into your available time.</li>
+<li>Add or edit goals directly from the calendar by clicking <b>+ Add Goal</b> or double-clicking a goal.</li>
+</ul>
+<h3>How do I use Achievements?</h3>
+<p>Go to the <b>Achievements</b> tab to view milestones you can unlock. Achievements are earned for streaks, focus, session time, and more. Click an achievement to see its description and progress.</p>
+<h3>How do I use Surveys?</h3>
+<p>After completing a goal, go to the <b>Surveys</b> tab to reflect on your session. Fill out the mood, distractions, satisfaction, and feedback. Surveys help you identify patterns and improve your study habits.</p>
+<h3>How do I use Analytics?</h3>
+<ul>
+<li>Use the <b>Analytics</b> tab to explore your study patterns, focus, and progress.</li>
+<li>Hover over each chart for a tooltip explaining what it shows.</li>
+<li>Use the date range selectors to filter your data.</li>
+<li>Check the <b>Study Insights</b> section for smart tips and patterns detected by the app.</li>
+</ul>
+<h3>How do I get notifications?</h3>
+<p>Enable notifications in the <b>Settings</b> tab. You can choose which events trigger notifications (Pomodoro completion, achievements, streaks, etc.).</p>
+<h3>How do I export my data?</h3>
+<p>Use the <b>Export</b> button in the Dashboard or Analytics tab to save your data as a CSV file for further analysis or sharing.</p>
+<h3>Who can I contact for support?</h3>
+<p>For support or feedback, email: <b>support@studybuddy.app</b> or use the feedback form in the app (if available).</p>
+<h3>Tips</h3>
+<ul>
+<li>Hover over charts and buttons for tooltips.</li>
+<li>Check the <b>Achievements</b> tab for milestones you can unlock!</li>
+<li>Use the <b>Surveys</b> tab to reflect on your sessions and improve your habits.</li>
+<li>Recurring goals can be set to repeat daily, weekly, or monthly.</li>
+<li>Use the <b>Settings</b> tab to customize Pomodoro durations, streak thresholds, and notification preferences.</li>
+<li>Missed a day? Check your streak and get back on track!</li>
+</ul>
+)");
+    faqText->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    layout->addWidget(faqText);
+    QPushButton *walkthroughBtn = new QPushButton("Show Walkthrough");
+    layout->addWidget(walkthroughBtn);
+    connect(walkthroughBtn, &QPushButton::clicked, this, &MainWindow::startWalkthroughOverlay);
+    tabWidget->addTab(helpTab, "Help");
+}
+
+void MainWindow::startWalkthroughOverlay() {
+    if (walkthroughOverlay) {
+        walkthroughOverlay->hide();
+        walkthroughOverlay->deleteLater();
+    }
+    walkthroughOverlay = new WalkthroughOverlay(this);
+    walkthroughOverlay->setGeometry(this->rect());
+    QList<WalkthroughOverlay::Step> steps;
+    // Helper to get tab rect by name
+    auto tabRect = [this](const QString& name) -> QRect {
+        QTabBar* bar = tabWidget->findChild<QTabBar*>();
+        if (!bar) return QRect();
+        const int highlightYOffset = 24; // Move highlight down
+        for (int i = 0; i < bar->count(); ++i) {
+            if (tabWidget->tabText(i).toLower() == name.toLower()) {
+                QRect r = bar->tabRect(i);
+                QPoint global = bar->mapTo(this, r.topLeft()) + QPoint(0, highlightYOffset);
+                return QRect(global, r.size());
+            }
+        }
+        return QRect();
+    };
+    steps.append({tabRect("Dashboard"), "This is the Dashboard tab. Here you can create, view, and track your study goals. Start Pomodoro sessions or edit goals here.", "Dashboard"});
+    steps.append({tabRect("Webcam"), "The Webcam tab lets you track your focus using your camera. Start a session to monitor your attention and get real-time feedback.", "Webcam"});
+    steps.append({tabRect("Buddy"), "The Buddy tab is your AI study assistant. Chat with Buddy for study tips, summaries, and motivation.", "Buddy"});
+    steps.append({tabRect("Achievements"), "The Achievements tab shows your unlocked milestones and progress. Click an achievement to see details.", "Achievements"});
+    steps.append({tabRect("Surveys"), "The Surveys tab lets you reflect on your study sessions, track distractions, and provide feedback.", "Surveys"});
+    steps.append({tabRect("Analytics"), "The Analytics tab shows your study patterns, focus, and progress. Use the date range to filter your data and check the Study Insights for smart tips.", "Analytics"});
+    steps.append({tabRect("Calendar"), "The Calendar tab helps you plan and review your study schedule. Click a day to use the Smart Planner and organize your goals.", "Calendar"});
+    steps.append({tabRect("Settings"), "In the Settings tab, you can customize Pomodoro durations, notification preferences, and more.", "Settings"});
+    steps.append({tabRect("Help"), "The Help tab provides answers to common questions and tips for getting the most out of StudyBuddy. You can always restart this walkthrough from here.", "Help"});
+    walkthroughOverlay->setSteps(steps);
+    walkthroughOverlay->onFinish = [this]() {
+        if (walkthroughOverlay) walkthroughOverlay->hide();
+    };
+    walkthroughOverlay->show();
+    walkthroughOverlay->raise();
+    walkthroughOverlay->activateWindow();
+    // Switch tab on overlay step change
+    connect(walkthroughOverlay, &WalkthroughOverlay::stepChanged, this, [this, steps](int step) {
+        if (step >= 0 && step < steps.size()) {
+            QString tab = steps[step].tabName;
+            for (int i = 0; i < tabWidget->count(); ++i) {
+                if (tabWidget->tabText(i).toLower() == tab.toLower()) {
+                    tabWidget->setCurrentIndex(i);
+                    break;
+                }
+            }
+        }
+    });
+    // Initial tab
+    if (!steps.isEmpty()) {
+        QString tab = steps[0].tabName;
+        for (int i = 0; i < tabWidget->count(); ++i) {
+            if (tabWidget->tabText(i).toLower() == tab.toLower()) {
+                tabWidget->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
 }

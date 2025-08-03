@@ -5,12 +5,9 @@
 #include <QMessageBox>
 #include <QCoreApplication>
 
-StudyGoal::StudyGoal(QObject *parent)
-    : QObject(parent)
-    , m_currentTrackingGoalId(-1)
-    , m_pomodoroTimer(nullptr)
+StudyGoal::StudyGoal(QSqlDatabase& db, QObject *parent)
+    : QObject(parent), db(db), m_currentTrackingGoalId(-1), m_pomodoroTimer(nullptr)
 {
-    initializeDatabase();
 }
 
 StudyGoal::~StudyGoal()
@@ -20,69 +17,6 @@ StudyGoal::~StudyGoal()
         db = QSqlDatabase();
         QSqlDatabase::removeDatabase("StudyGoalsConnection");
     }
-}
-
-bool StudyGoal::initializeDatabase()
-{
-    if (!QSqlDatabase::contains("StudyGoalsConnection")) {
-        db = QSqlDatabase::addDatabase("QSQLITE", "StudyGoalsConnection");
-        QString dbPath = QCoreApplication::applicationDirPath() + "/study_goals.db";
-        db.setDatabaseName(dbPath);
-    } else {
-        db = QSqlDatabase::database("StudyGoalsConnection");
-    }
-
-    if (!db.open()) {
-        qDebug() << "Error: Unable to open study goals database" << db.lastError().text();
-        return false;
-    }
-
-    QSqlQuery query(db);
-    QString createTableQuery =
-        "CREATE TABLE IF NOT EXISTS goals ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "subject TEXT NOT NULL, "
-        "target_minutes INTEGER NOT NULL, "
-        "completed_minutes INTEGER DEFAULT 0, "
-        "start_date TEXT NOT NULL, "
-        "due_date TEXT, "
-        "status TEXT DEFAULT 'Active', "
-        "notes TEXT, "
-        "recurrence_type TEXT DEFAULT 'None', "
-        "recurrence_value TEXT, "
-        "last_generated_date TEXT, "
-        "category TEXT DEFAULT 'Uncategorized'"
-        ")";
-
-    if (!query.exec(createTableQuery)) {
-        qDebug() << "Error: Failed to create goals table" << query.lastError().text();
-        return false;
-    }
-
-    QSqlRecord record = db.record("goals");
-    if (!record.contains("recurrence_type")) {
-        if (!query.exec("ALTER TABLE goals ADD COLUMN recurrence_type TEXT DEFAULT 'None'")) {
-            qDebug() << "Error adding recurrence_type column:" << query.lastError().text();
-        }
-    }
-    if (!record.contains("recurrence_value")) {
-        if (!query.exec("ALTER TABLE goals ADD COLUMN recurrence_value TEXT DEFAULT ''")) {
-            qDebug() << "Error adding recurrence_value column:" << query.lastError().text();
-        }
-    }
-    if (!record.contains("last_generated_date")) {
-        if (!query.exec("ALTER TABLE goals ADD COLUMN last_generated_date TEXT")) {
-            qDebug() << "Error adding last_generated_date column:" << query.lastError().text();
-        }
-    }
-    if (!record.contains("category")) {
-        if (!query.exec("ALTER TABLE goals ADD COLUMN category TEXT DEFAULT 'Uncategorized'")) {
-            qDebug() << "Error adding category column to goals table" << query.lastError().text();
-        }
-    }
-
-    qDebug() << "Study goals database initialized successfully.";
-    return true;
 }
 
 bool StudyGoal::executeQuery(const QString &queryStr, QSqlQuery &result)
@@ -100,7 +34,7 @@ bool StudyGoal::executeQuery(const QString &queryStr, QSqlQuery &result)
 }
 
 // Goal Management
-bool StudyGoal::createGoal(const QString &subject, int targetMinutes, const QString &notes, const QString &recurrenceType, const QString &recurrenceValue, const QString &category)
+bool StudyGoal::createGoal(const QString &subject, int targetMinutes, const QString &notes, const QString &recurrenceType, const QString &recurrenceValue, const QString &category, const QStringList &resources)
 {
     if (!db.isOpen()) {
         qDebug() << "Error: Database not open for creating goal.";
@@ -123,8 +57,16 @@ bool StudyGoal::createGoal(const QString &subject, int targetMinutes, const QStr
         qDebug() << "Error creating goal:" << query.lastError().text();
         return false;
     }
-    
     int newGoalId = query.lastInsertId().toInt();
+    // Store resources
+    for (const QString &res : resources) {
+        QSqlQuery resQuery(db);
+        resQuery.prepare("INSERT INTO goal_resources (goal_id, type, value) VALUES (?, ?, ?)");
+        resQuery.addBindValue(newGoalId);
+        resQuery.addBindValue(res.startsWith("http") ? "link" : "file");
+        resQuery.addBindValue(res);
+        resQuery.exec();
+    }
     if (recurrenceType != "None") {
         generateRecurringGoals(newGoalId);
     }
@@ -132,13 +74,22 @@ bool StudyGoal::createGoal(const QString &subject, int targetMinutes, const QStr
     return true;
 }
 
-bool StudyGoal::updateGoal(int goalId, const QString &subject, int targetMinutes, const QString &notes, const QString &recurrenceType, const QString &recurrenceValue, const QString &category)
+bool StudyGoal::updateGoal(int goalId, const QString &subject, int targetMinutes, const QString &notes, const QString &recurrenceType, const QString &recurrenceValue, const QString &category, const QStringList &resources)
 {
     if (!db.isOpen()) {
         qDebug() << "Error: Database not open for updating goal.";
         return false;
     }
-
+    // Check if the goal exists before updating
+    QSqlQuery checkQuery(db);
+    checkQuery.prepare("SELECT COUNT(*) FROM goals WHERE id = ?");
+    checkQuery.addBindValue(goalId);
+    checkQuery.exec();
+    checkQuery.next();
+    if (checkQuery.value(0).toInt() == 0) {
+        qDebug() << "No goal found with ID" << goalId << "in database.";
+        return false;
+    }
     QSqlQuery query(db);
     query.prepare("UPDATE goals SET subject = ?, target_minutes = ?, notes = ?, recurrence_type = ?, recurrence_value = ?, category = ? WHERE id = ?");
     query.addBindValue(subject);
@@ -148,20 +99,26 @@ bool StudyGoal::updateGoal(int goalId, const QString &subject, int targetMinutes
     query.addBindValue(recurrenceValue);
     query.addBindValue(category);
     query.addBindValue(goalId);
-
     if (!query.exec()) {
         qDebug() << "Error updating goal:" << query.lastError().text();
         return false;
     }
-
-    if (query.numRowsAffected() > 0) {
-        qDebug() << "Goal" << goalId << "updated successfully.";
-        emit goalUpdated(goalId);
-        return true;
-    } else {
-        qDebug() << "No goal found with ID" << goalId << "to update.";
-        return false;
+    // Remove old resources
+    QSqlQuery delRes(db);
+    delRes.prepare("DELETE FROM goal_resources WHERE goal_id = ?");
+    delRes.addBindValue(goalId);
+    delRes.exec();
+    // Add new resources
+    for (const QString &res : resources) {
+        QSqlQuery resQuery(db);
+        resQuery.prepare("INSERT INTO goal_resources (goal_id, type, value) VALUES (?, ?, ?)");
+        resQuery.addBindValue(goalId);
+        resQuery.addBindValue(res.startsWith("http") ? "link" : "file");
+        resQuery.addBindValue(res);
+        resQuery.exec();
     }
+    emit goalUpdated(goalId);
+    return true;
 }
 
 bool StudyGoal::deleteGoal(int goalId)
@@ -198,17 +155,14 @@ QList<GoalInfo> StudyGoal::getGoalsForDate(const QDate &date) const
         qDebug() << "Error: Database not open for retrieving goals.";
         return goals;
     }
-
     QSqlQuery query(db);
     query.prepare("SELECT id, subject, target_minutes, completed_minutes, start_date, due_date, status, notes, recurrence_type, recurrence_value, last_generated_date, category FROM goals WHERE start_date <= ? AND (due_date IS NULL OR due_date >= ?) AND status = 'Active'");
     query.addBindValue(date.toString(Qt::ISODate));
     query.addBindValue(date.toString(Qt::ISODate));
-
     if (!query.exec()) {
         qDebug() << "Error retrieving goals for date:" << query.lastError().text();
         return goals;
     }
-
     while (query.next()) {
         GoalInfo goal;
         goal.id = query.value("id").toInt();
@@ -223,6 +177,8 @@ QList<GoalInfo> StudyGoal::getGoalsForDate(const QDate &date) const
         goal.recurrenceValue = query.value("recurrence_value").toString();
         goal.lastGeneratedDate = QDate::fromString(query.value("last_generated_date").toString(), Qt::ISODate);
         goal.category = query.value("category").toString();
+        // Fetch resources
+        goal.resources = getResourcesForGoal(goal.id);
         goals.append(goal);
     }
     return goals;
@@ -351,6 +307,7 @@ bool StudyGoal::addProgress(int goalId, int minutesToAdd)
         return false;
     }
     emit goalUpdated(goalId);
+    emit sessionProgressUpdated(goalId, minutesToAdd); 
     return true;
 }
 
@@ -372,35 +329,21 @@ void StudyGoal::startTrackingGoal(int goalId, int initialElapsedSeconds)
 
 void StudyGoal::stopTrackingGoal()
 {
+    if (m_currentTrackingGoalId != -1 && m_pomodoroTimer) {
+        // Calculate elapsed time
+        int elapsedSeconds = m_pomodoroSessionStartTime.secsTo(QTime::currentTime());
+        int minutesToAdd = elapsedSeconds / 60;
+        if (minutesToAdd > 0) {
+            addProgress(m_currentTrackingGoalId, minutesToAdd);
+            emit sessionProgressUpdated(m_currentTrackingGoalId, minutesToAdd);
+        }
+    }
     m_currentTrackingGoalId = -1;
     emit goalTrackingStopped();
 }
 
 void StudyGoal::handlePomodoroTimerCompletedInternally()
 {
-    if (m_currentTrackingGoalId != -1) {
-        int elapsedSeconds = m_pomodoroSessionStartTime.secsTo(QTime::currentTime());
-        int completedMinutesFromDB = getProgress(m_currentTrackingGoalId);
-        int targetMinutes = getTarget(m_currentTrackingGoalId);
-        int minutesCompleted = elapsedSeconds / 60;
-        int totalCompleted = completedMinutesFromDB + minutesCompleted;
-        int minutesToAdd = minutesCompleted;
-        if (totalCompleted >= targetMinutes && targetMinutes > 0) {
-            minutesToAdd = targetMinutes - completedMinutesFromDB;
-        }
-        if (minutesToAdd > 0 && addProgress(m_currentTrackingGoalId, minutesToAdd)) {
-            qDebug() << "Progress updated for goal" << m_currentTrackingGoalId << ":" << minutesToAdd << "minutes";
-            emit sessionProgressUpdated(m_currentTrackingGoalId, minutesToAdd);
-            if (completedMinutesFromDB + minutesToAdd >= targetMinutes && targetMinutes > 0) {
-                stopTrackingGoal();
-                QMessageBox::information(nullptr, "Goal Completed!", QString("Congratulations! You have completed your goal for '%1'!").arg(getGoalDetails(m_currentTrackingGoalId)["subject"].toString()));
-            } else {
-                m_currentTrackingGoalId = -1;
-            }
-        } else {
-            qDebug() << "Failed to add progress for goal" << m_currentTrackingGoalId;
-        }
-    }
 }
 
 void StudyGoal::handlePomodoroTimeUpdated(const QString &time)
@@ -415,7 +358,6 @@ void StudyGoal::handlePomodoroTimeUpdated(const QString &time)
         if (totalCompleted >= targetMinutes && targetMinutes > 0) {
             emit sessionTimeUpdated(m_currentTrackingGoalId, (targetMinutes - completedMinutesFromDB) * 60);
             stopTrackingGoal();
-            QMessageBox::information(nullptr, "Goal Completed!", QString("Congratulations! You have completed your goal for '%1'!").arg(getGoalDetails(m_currentTrackingGoalId)["subject"].toString()));
             return;
         }
         emit sessionTimeUpdated(m_currentTrackingGoalId, elapsedSeconds);
@@ -533,6 +475,22 @@ void StudyGoal::generateRecurringGoals(int parentGoalId)
     }
 }
 
+void StudyGoal::checkAndGenerateAllRecurringGoals() {
+    if (!db.isOpen()) return;
+    QSqlQuery query(db);
+    query.prepare("SELECT id, recurrence_type, last_generated_date FROM goals WHERE recurrence_type != 'None'");
+    if (!query.exec()) return;
+    QDate today = QDate::currentDate();
+    while (query.next()) {
+        int goalId = query.value(0).toInt();
+        QString recurrenceType = query.value(1).toString();
+        QDate lastGen = QDate::fromString(query.value(2).toString(), Qt::ISODate);
+        if (lastGen.isValid() && lastGen < today) {
+            generateRecurringGoals(goalId);
+        }
+    }
+}
+
 // Statistics
 QMap<QString, int> StudyGoal::getSubjectStats(const QDate &startDate, const QDate &endDate)
 {
@@ -581,4 +539,19 @@ QMap<QString, int> StudyGoal::getDailyStats(const QDate &date)
         stats["totalMinutes"] = 0;
     }
     return stats;
+}
+
+QList<QString> StudyGoal::getResourcesForGoal(int goalId) const
+{
+    QList<QString> resources;
+    if (!db.isOpen()) return resources;
+    QSqlQuery query(db);
+    query.prepare("SELECT value FROM goal_resources WHERE goal_id = ?");
+    query.addBindValue(goalId);
+    if (query.exec()) {
+        while (query.next()) {
+            resources.append(query.value(0).toString());
+        }
+    }
+    return resources;
 }

@@ -10,7 +10,7 @@
 #include <QtCharts/QBarCategoryAxis>
 #include <QtCharts/QPieSeries>
 #include <QColor>
-
+#include <QtCharts/QLegendMarker>
 StudyAnalytics::StudyAnalytics(QSqlDatabase &database, QObject *parent)
     : QObject(parent),
       db(database)
@@ -48,18 +48,24 @@ QChart* StudyAnalytics::createFocusChart(const QDate &startDate, const QDate &en
 {
     QChart *chart = new QChart();
     QLineSeries *series = new QLineSeries();
-    series->setColor(QColor("#6F2232"));
+    series->setColor(QColor("#C3073F")); // Carmine red
     QSqlQuery query(db);
-    query.prepare("SELECT timestamp, focus_score FROM detections "
-                 "WHERE date(timestamp) BETWEEN ? AND ?");
+    query.prepare("SELECT date(timestamp) as day, AVG(focus_score) as avg_focus FROM detections WHERE date(timestamp) BETWEEN ? AND ? GROUP BY day ORDER BY day");
     query.addBindValue(startDate.toString("yyyy-MM-dd"));
     query.addBindValue(endDate.toString("yyyy-MM-dd"));
-    query.exec();
-    while (query.next()) {
-        QDateTime time = query.value(0).toDateTime();
-        float score = query.value(1).toFloat();
-        series->append(time.toMSecsSinceEpoch(), score);
+    if (!query.exec()) {
+        qDebug() << "Focus chart query failed:" << query.lastError().text();
     }
+    int count = 0;
+    while (query.next()) {
+        QString day = query.value(0).toString();
+        float avgFocus = query.value(1).toFloat();
+        qDebug() << "FocusChart day:" << day << "avgFocus:" << avgFocus;
+        QDate date = QDate::fromString(day, "yyyy-MM-dd");
+        series->append(QDateTime(date, QTime(0,0)).toMSecsSinceEpoch(), avgFocus * 100); // percent
+        count++;
+    }
+    if (count == 0) qDebug() << "Focus chart: no data for selected range.";
     chart->addSeries(series);
     chart->setTitle("Focus Score Over Time");
     QDateTimeAxis *axisX = new QDateTimeAxis();
@@ -73,6 +79,10 @@ QChart* StudyAnalytics::createFocusChart(const QDate &startDate, const QDate &en
     chart->addAxis(axisY, Qt::AlignLeft);
     series->attachAxis(axisY);
     chart->setTheme(QChart::ChartThemeDark);
+    // Force legend color
+    QPen pen(QColor("#C3073F"));
+    pen.setWidth(3);
+    series->setPen(pen);
     return chart;
 }
 
@@ -80,31 +90,49 @@ QChart* StudyAnalytics::createProductivityChart(const QDate &startDate, const QD
 {
     QChart *chart = new QChart();
     QLineSeries *series = new QLineSeries();
-    series->setColor(QColor("#6F2232"));
+    series->setColor(QColor("#C3073F")); // Carmine red
+    QMap<QDate, int> detectionsPerDay;
     QSqlQuery query(db);
-    query.prepare("SELECT date(timestamp) as study_date, COUNT(*) as detections_count FROM detections "
-                 "WHERE date(timestamp) BETWEEN ? AND ? GROUP BY study_date ORDER BY study_date");
+    query.prepare("SELECT date(timestamp) as study_date, COUNT(*) as detections_count FROM detections WHERE date(timestamp) BETWEEN ? AND ? GROUP BY study_date ORDER BY study_date");
     query.addBindValue(startDate.toString("yyyy-MM-dd"));
     query.addBindValue(endDate.toString("yyyy-MM-dd"));
-    query.exec();
-    while (query.next()) {
-        QDate date = query.value(0).toDate();
-        int detectionsCount = query.value(1).toInt();
-        series->append(QDateTime(date, QTime(0, 0)).toMSecsSinceEpoch(), detectionsCount); 
+    if (!query.exec()) {
+        qDebug() << "Productivity chart query failed:" << query.lastError().text();
     }
+    while (query.next()) {
+        QString day = query.value(0).toString();
+        int detectionsCount = query.value(1).toInt();
+        qDebug() << "ProductivityChart day:" << day << "detectionsCount:" << detectionsCount;
+        QDate date = QDate::fromString(day, "yyyy-MM-dd");
+        detectionsPerDay[date] = detectionsCount;
+    }
+    // Fill in zeros for days with no data
+    QDate d = startDate;
+    while (d <= endDate) {
+        int count = detectionsPerDay.value(d, 0);
+        series->append(QDateTime(d, QTime(0, 0)).toMSecsSinceEpoch(), count);
+        d = d.addDays(1);
+    }
+    if (series->count() == 0) qDebug() << "Productivity chart: no data for selected range.";
     chart->addSeries(series);
-    chart->setTitle("Study Detections Over Time"); 
+    chart->setTitle("Study Detections Over Time");
     QDateTimeAxis *axisX = new QDateTimeAxis();
     axisX->setFormat("MMM dd");
     axisX->setTitleText("Date");
     chart->addAxis(axisX, Qt::AlignBottom);
     series->attachAxis(axisX);
     QValueAxis *axisY = new QValueAxis();
-    axisY->setRange(0, 500); 
-    axisY->setTitleText("Detections Count"); 
+    axisY->setRange(0, 500); // You may want to adjust this dynamically
+    axisY->setTitleText("Detections Count");
     chart->addAxis(axisY, Qt::AlignLeft);
     series->attachAxis(axisY);
     chart->setTheme(QChart::ChartThemeDark);
+    // Force legend color and marker style
+    QPen pen(QColor("#C3073F"));
+    pen.setWidth(3);
+    series->setPen(pen);
+    series->setPointsVisible(true);
+    series->setMarkerSize(5.0); // Make dots smaller
     return chart;
 }
 
@@ -220,6 +248,36 @@ QString StudyAnalytics::formatDayOfWeek(int day) const
     return QString(days[day - 1]);
 }
 
+QStringList StudyAnalytics::getNeglectedSubjects(int days, const QDate &endDate) {
+    QStringList neglected;
+    QSqlQuery query(db);
+    // Get all subjects
+    query.prepare("SELECT DISTINCT subject FROM goals");
+    if (!query.exec()) return neglected;
+    QList<QString> subjects;
+    while (query.next()) {
+        subjects << query.value(0).toString();
+    }
+    QDate startDate = endDate.addDays(-days+1);
+    for (const QString& subject : subjects) {
+        QSqlQuery q(db);
+        q.prepare("SELECT MAX(start_date) FROM goals WHERE subject = ? AND completed_minutes > 0");
+        q.addBindValue(subject);
+        if (q.exec() && q.next()) {
+            QString lastDateStr = q.value(0).toString();
+            if (lastDateStr.isEmpty()) {
+                neglected << subject;
+            } else {
+                QDate lastDate = QDate::fromString(lastDateStr, "yyyy-MM-dd");
+                if (lastDate.isValid() && lastDate < startDate) {
+                    neglected << subject;
+                }
+            }
+        }
+    }
+    return neglected;
+}
+
 void StudyAnalytics::analyzePatterns(const QDate &startDate, const QDate &endDate)
 {
     loadHistoricalData(startDate, endDate);
@@ -238,11 +296,91 @@ void StudyAnalytics::analyzePatterns(const QDate &startDate, const QDate &endDat
         emit productivityInsight(QString("Most productive hour: %1:00").arg(mostProductiveHour));
     }
 
-    // Analyze subject performance
-    QMap<QString, float> subjectPerformance = getSubjectPerformance();
-    QString bestSubject = getBestPerformingSubject();
-    if (!bestSubject.isEmpty()) {
-        emit productivityInsight(QString("Best performing subject: %1").arg(bestSubject));
+    // Neglected subjects insight
+    QStringList neglected = getNeglectedSubjects(7, endDate); // 7 days
+    if (!neglected.isEmpty()) {
+        emit patternDetected(QString("You haven't studied %1 in the last 7 days.").arg(neglected.join(", ")));
+    }
+
+    // Focus drop-off insight
+    QMap<int, QList<float>> focusByMinute; // minute -> focus scores
+    QSqlQuery query(db);
+    query.prepare("SELECT timestamp, focus_score FROM detections WHERE date(timestamp) BETWEEN ? AND ?");
+    query.addBindValue(startDate.toString("yyyy-MM-dd"));
+    query.addBindValue(endDate.toString("yyyy-MM-dd"));
+    if (query.exec()) {
+        QMap<QString, QTime> sessionStartTimes; // date string -> first time
+        while (query.next()) {
+            QString ts = query.value(0).toString();
+            float focus = query.value(1).toFloat();
+            QDateTime dt = QDateTime::fromString(ts, "yyyy-MM-dd HH:mm:ss");
+            QString dateStr = dt.date().toString("yyyy-MM-dd");
+            if (!sessionStartTimes.contains(dateStr)) {
+                sessionStartTimes[dateStr] = dt.time();
+            }
+            int minute = sessionStartTimes[dateStr].secsTo(dt.time()) / 60;
+            if (minute >= 0 && minute < 180) // up to 3 hours
+                focusByMinute[minute].append(focus);
+        }
+        QMap<int, float> avgFocusByMinute;
+        for (auto it = focusByMinute.begin(); it != focusByMinute.end(); ++it) {
+            float sum = 0;
+            for (float f : it.value()) sum += f;
+            avgFocusByMinute[it.key()] = it.value().isEmpty() ? 0 : sum / it.value().size();
+        }
+        float base = 0;
+        int baseCount = 0;
+        for (int i = 0; i < 10; ++i) {
+            if (avgFocusByMinute.contains(i)) {
+                base += avgFocusByMinute[i];
+                baseCount++;
+            }
+        }
+        if (baseCount > 0) {
+            float baseAvg = base / baseCount;
+            for (int i = 10; i < 120; ++i) {
+                if (avgFocusByMinute.contains(i) && avgFocusByMinute[i] < baseAvg * 0.9) {
+                    emit patternDetected(QString("Your focus drops after %1 minutes. Try shorter sessions for better results.").arg(i));
+                    break;
+                }
+            }
+        }
+    }
+
+    // Distraction pattern insight
+    QMap<QString, QMap<QString, int>> distractionByDay; // distraction -> day -> count
+    QSqlQuery surveyQ(db);
+    surveyQ.prepare("SELECT timestamp, distractions FROM surveys WHERE timestamp BETWEEN ? AND ?");
+    surveyQ.addBindValue(startDate.toString("yyyy-MM-dd"));
+    surveyQ.addBindValue(endDate.toString("yyyy-MM-dd"));
+    if (surveyQ.exec()) {
+        while (surveyQ.next()) {
+            QString ts = surveyQ.value(0).toString();
+            QString distractions = surveyQ.value(1).toString();
+            QDateTime dt = QDateTime::fromString(ts, "yyyy-MM-ddTHH:mm:ss");
+            if (!dt.isValid()) dt = QDateTime::fromString(ts, "yyyy-MM-dd HH:mm:ss");
+            QString day = dt.date().toString("dddd");
+            for (const QString& d : distractions.split(",", Qt::SkipEmptyParts)) {
+                QString trimmed = d.trimmed();
+                if (!trimmed.isEmpty())
+                    distractionByDay[trimmed][day]++;
+            }
+        }
+        QString topDistraction;
+        QString topDay;
+        int maxCount = 0;
+        for (auto it = distractionByDay.begin(); it != distractionByDay.end(); ++it) {
+            for (auto dayIt = it.value().begin(); dayIt != it.value().end(); ++dayIt) {
+                if (dayIt.value() > maxCount) {
+                    maxCount = dayIt.value();
+                    topDistraction = it.key();
+                    topDay = dayIt.key();
+                }
+            }
+        }
+        if (!topDistraction.isEmpty() && !topDay.isEmpty()) {
+            emit patternDetected(QString("You report '%1' as a distraction most on %2.").arg(topDistraction, topDay));
+        }
     }
 
     emit analyticsUpdated();
@@ -265,130 +403,10 @@ QMap<QString, int> StudyAnalytics::getProductivityByHour() const
     return hourlyProductivity;
 }
 
-QMap<QString, float> StudyAnalytics::getSubjectPerformance() const
-{
-    qDebug() << "Subject performance analysis not available with current database schema (no subject field in 'detections' table).";
-    return QMap<QString, float>();
-}
-
-QString StudyAnalytics::getBestPerformingSubject() const
-{
-    return QString();
-}
-
-QChart* StudyAnalytics::createEffectivenessChart(const QDate &startDate, const QDate &endDate)
-{
-    QChart *chart = new QChart();
-    chart->setTitle("Session Effectiveness Over Time");
-    QBarSeries *series = new QBarSeries();
-    QBarSet *set = new QBarSet("Effectiveness");
-    set->setColor(QColor("#C3073F"));
-    QStringList categories;
-    QMap<QString, int> effectivenessCounts;
-    QSqlQuery query(db);
-    query.prepare("SELECT effectiveness, COUNT(*) FROM session_reviews WHERE date(review_date) BETWEEN ? AND ? GROUP BY effectiveness");
-    query.addBindValue(startDate.toString("yyyy-MM-dd"));
-    query.addBindValue(endDate.toString("yyyy-MM-dd"));
-    query.exec();
-    while (query.next()) {
-        QString eff = query.value(0).toString();
-        int count = query.value(1).toInt();
-        effectivenessCounts[eff] = count;
-    }
-    QStringList effOrder = {"Highly Effective", "Moderately Effective", "Neutral", "Slightly Ineffective", "Highly Ineffective"};
-    for (const QString &eff : effOrder) {
-        categories << eff;
-        *set << effectivenessCounts.value(eff, 0);
-    }
-    series->append(set);
-    chart->addSeries(series);
-    QBarCategoryAxis *axisX = new QBarCategoryAxis();
-    axisX->append(categories);
-    chart->addAxis(axisX, Qt::AlignBottom);
-    series->attachAxis(axisX);
-    QValueAxis *axisY = new QValueAxis();
-    axisY->setTitleText("Sessions");
-    chart->addAxis(axisY, Qt::AlignLeft);
-    series->attachAxis(axisY);
-    chart->setTheme(QChart::ChartThemeDark);
-    return chart;
-}
-
-QChart* StudyAnalytics::createDistractionChart(const QDate &startDate, const QDate &endDate)
-{
-    QChart *chart = new QChart();
-    chart->setTitle("Distraction Events Frequency");
-    QBarSeries *series = new QBarSeries();
-    QBarSet *set = new QBarSet("Distraction Events");
-    set->setColor(QColor("#C3073F"));
-    QStringList categories;
-    QMap<QString, int> distractionCounts;
-    QSqlQuery query(db);
-    query.prepare("SELECT distraction_events, COUNT(*) FROM session_reviews WHERE date(review_date) BETWEEN ? AND ? GROUP BY distraction_events");
-    query.addBindValue(startDate.toString("yyyy-MM-dd"));
-    query.addBindValue(endDate.toString("yyyy-MM-dd"));
-    query.exec();
-    int withDistraction = 0, withoutDistraction = 0;
-    while (query.next()) {
-        QString events = query.value(0).toString().trimmed();
-        int count = query.value(1).toInt();
-        if (!events.isEmpty())
-            withDistraction += count;
-        else
-            withoutDistraction += count;
-    }
-    categories << "With Distraction" << "No Distraction";
-    *set << withDistraction << withoutDistraction;
-    series->append(set);
-    chart->addSeries(series);
-    QBarCategoryAxis *axisX = new QBarCategoryAxis();
-    axisX->append(categories);
-    chart->addAxis(axisX, Qt::AlignBottom);
-    series->attachAxis(axisX);
-    QValueAxis *axisY = new QValueAxis();
-    axisY->setTitleText("Sessions");
-    chart->addAxis(axisY, Qt::AlignLeft);
-    series->attachAxis(axisY);
-    chart->setTheme(QChart::ChartThemeDark);
-    return chart;
-}
-
-QChart* StudyAnalytics::createSubjectDistributionChart(const QDate &startDate, const QDate &endDate)
-{
-    QChart *chart = new QChart();
-    chart->setTitle("Most Studied Subjects");
-    QBarSeries *series = new QBarSeries();
-    QBarSet *set = new QBarSet("Sessions");
-    set->setColor(QColor("#C3073F"));
-    QStringList categories;
-    QSqlQuery query(db);
-    query.prepare("SELECT subject, COUNT(*) FROM session_plans WHERE date(plan_date) BETWEEN ? AND ? GROUP BY subject ORDER BY COUNT(*) DESC LIMIT 10");
-    query.addBindValue(startDate.toString("yyyy-MM-dd"));
-    query.addBindValue(endDate.toString("yyyy-MM-dd"));
-    query.exec();
-    while (query.next()) {
-        QString subject = query.value(0).toString();
-        int count = query.value(1).toInt();
-        categories << subject;
-        *set << count;
-    }
-    series->append(set);
-    chart->addSeries(series);
-    QBarCategoryAxis *axisX = new QBarCategoryAxis();
-    axisX->append(categories);
-    chart->addAxis(axisX, Qt::AlignBottom);
-    series->attachAxis(axisX);
-    QValueAxis *axisY = new QValueAxis();
-    axisY->setTitleText("Sessions");
-    chart->addAxis(axisY, Qt::AlignLeft);
-    series->attachAxis(axisY);
-    chart->setTheme(QChart::ChartThemeDark);
-    return chart;
-}
-
 QChart* StudyAnalytics::createGoalCompletionChart(const QDate &startDate, const QDate &endDate)
 {
     QChart *chart = new QChart();
+    chart->setTheme(QChart::ChartThemeDark); 
     chart->setTitle("Goal Completion Rate");
     QPieSeries *series = new QPieSeries();
     int completed = 0, incomplete = 0;
@@ -396,7 +414,9 @@ QChart* StudyAnalytics::createGoalCompletionChart(const QDate &startDate, const 
     query.prepare("SELECT completed_minutes, target_minutes FROM goals WHERE start_date BETWEEN ? AND ?");
     query.addBindValue(startDate.toString("yyyy-MM-dd"));
     query.addBindValue(endDate.toString("yyyy-MM-dd"));
-    query.exec();
+    if (!query.exec()) {
+        qDebug() << "Goal completion chart query failed:" << query.lastError().text();
+    }
     while (query.next()) {
         int done = query.value(0).toInt();
         int target = query.value(1).toInt();
@@ -405,43 +425,122 @@ QChart* StudyAnalytics::createGoalCompletionChart(const QDate &startDate, const 
         else
             incomplete++;
     }
-    series->append("Completed", completed);
-    series->append("Incomplete", incomplete);
-    if (!series->slices().isEmpty())
-        series->slices().at(0)->setColor(QColor("#6F2232"));
-    if (series->slices().size() > 1)
-        series->slices().at(1)->setColor(QColor("#4E4E50"));
-    chart->addSeries(series);
-    chart->setTheme(QChart::ChartThemeDark);
-    return chart;
-}
+    if (completed > 0)
+        series->append("Completed", completed);
+    if (incomplete > 0)
+        series->append("Incomplete", incomplete);
 
-QChart* StudyAnalytics::createStreakChart(const QDate &startDate, const QDate &endDate)
-{
-    QChart *chart = new QChart();
-    chart->setTitle("Streak Progress");
-    QLineSeries *series = new QLineSeries();
-    series->setColor(QColor("#6F2232"));
-    QSqlQuery query(db);
-    query.prepare("SELECT date, streak_count FROM study_streaks WHERE date BETWEEN ? AND ? ORDER BY date");
-    query.addBindValue(startDate.toString("yyyy-MM-dd"));
-    query.addBindValue(endDate.toString("yyyy-MM-dd"));
-    query.exec();
-    while (query.next()) {
-        QDate date = QDate::fromString(query.value(0).toString(), "yyyy-MM-dd");
-        int streak = query.value(1).toInt();
-        series->append(QDateTime(date, QTime(0,0)).toMSecsSinceEpoch(), streak);
+    // Set colors explicitly for all slices and legend markers
+    for (auto slice : series->slices()) {
+        if (slice->label() == "Completed") {
+            slice->setColor(QColor("#C3073F"));
+            slice->setBrush(QColor("#C3073F"));
+            slice->setPen(QPen(QColor("#C3073F")));
+        } else {
+            slice->setColor(QColor("#57071f"));
+            slice->setBrush(QColor("#57071f"));
+            slice->setPen(QPen(QColor("#57071f")));
+        }
+        slice->setBorderColor(slice->color());
     }
     chart->addSeries(series);
-    QDateTimeAxis *axisX = new QDateTimeAxis();
-    axisX->setFormat("MMM dd");
-    axisX->setTitleText("Date");
+
+    // Force legend marker color
+    auto markers = chart->legend()->markers(series);
+    for (int i = 0; i < series->count(); ++i) {
+        QPieSlice *slice = series->slices().at(i);
+        if (i < markers.size()) {
+            markers[i]->setBrush(slice->brush());
+            markers[i]->setPen(slice->pen());
+        }
+    }
+    return chart;
+} 
+
+QChart* StudyAnalytics::createSubjectTimeChart(const QDate &startDate, const QDate &endDate)
+{
+    QChart *chart = new QChart();
+    chart->setTheme(QChart::ChartThemeDark);
+    chart->setTitle("Time Spent per Subject");
+    QBarSeries *series = new QBarSeries();
+    QBarSet *set = new QBarSet("Minutes");
+    set->setColor(QColor("#C3073F"));
+    set->setBrush(QColor("#C3073F"));
+    QStringList categories;
+    QMap<QString, int> subjectMinutes;
+    QSqlQuery query(db);
+    query.prepare("SELECT subject, SUM(completed_minutes) FROM goals WHERE start_date BETWEEN ? AND ? GROUP BY subject");
+    query.addBindValue(startDate.toString("yyyy-MM-dd"));
+    query.addBindValue(endDate.toString("yyyy-MM-dd"));
+    if (!query.exec()) {
+        qDebug() << "Subject time chart query failed:" << query.lastError().text();
+    }
+    while (query.next()) {
+        QString subject = query.value(0).toString();
+        int minutes = query.value(1).toInt();
+        categories << subject;
+        *set << minutes;
+    }
+    if (categories.isEmpty()) {
+        categories << "No Data";
+        *set << 0;
+    }
+    series->append(set);
+    chart->addSeries(series);
+    QBarCategoryAxis *axisX = new QBarCategoryAxis();
+    axisX->append(categories);
     chart->addAxis(axisX, Qt::AlignBottom);
     series->attachAxis(axisX);
     QValueAxis *axisY = new QValueAxis();
-    axisY->setTitleText("Streak Count");
+    axisY->setTitleText("Minutes");
     chart->addAxis(axisY, Qt::AlignLeft);
     series->attachAxis(axisY);
+    return chart;
+} 
+
+QChart* StudyAnalytics::createDistractionBarChart(const QDate &startDate, const QDate &endDate)
+{
+    QChart *chart = new QChart();
     chart->setTheme(QChart::ChartThemeDark);
+    chart->setTitle("Reported Distractions");
+    QBarSeries *series = new QBarSeries();
+    QBarSet *set = new QBarSet("Count");
+    set->setColor(QColor("#C3073F"));
+    set->setBrush(QColor("#C3073F"));
+    QStringList categories;
+    QMap<QString, int> distractionCounts;
+    QSqlQuery query(db);
+    query.prepare("SELECT distractions FROM surveys WHERE timestamp BETWEEN ? AND ?");
+    query.addBindValue(startDate.toString("yyyy-MM-dd"));
+    query.addBindValue(endDate.toString("yyyy-MM-dd"));
+    if (!query.exec()) {
+        qDebug() << "Distraction bar chart query failed:" << query.lastError().text();
+    }
+    while (query.next()) {
+        QString distractions = query.value(0).toString();
+        for (const QString& d : distractions.split(",", Qt::SkipEmptyParts)) {
+            QString trimmed = d.trimmed();
+            if (!trimmed.isEmpty())
+                distractionCounts[trimmed]++;
+        }
+    }
+    for (auto it = distractionCounts.begin(); it != distractionCounts.end(); ++it) {
+        categories << it.key();
+        *set << it.value();
+    }
+    if (categories.isEmpty()) {
+        categories << "No Data";
+        *set << 0;
+    }
+    series->append(set);
+    chart->addSeries(series);
+    QBarCategoryAxis *axisX = new QBarCategoryAxis();
+    axisX->append(categories);
+    chart->addAxis(axisX, Qt::AlignBottom);
+    series->attachAxis(axisX);
+    QValueAxis *axisY = new QValueAxis();
+    axisY->setTitleText("Count");
+    chart->addAxis(axisY, Qt::AlignLeft);
+    series->attachAxis(axisY);
     return chart;
 } 
