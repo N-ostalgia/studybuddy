@@ -153,6 +153,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
     setupCharts();
     geminiNetworkManager = new QNetworkAccessManager(this);
+    loadApiKey();
     if (!initializeDatabase()) {
         QMessageBox::critical(this, "Error", "Failed to initialize the database.");
         return;
@@ -3683,5 +3684,16 @@ void MainWindow::startWalkthroughOverlay() {
                 break;
             }
         }
+    }
+}
+
+void MainWindow::loadApiKey() {
+    QSettings settings("config.ini", QSettings::IniFormat);
+    GEMINI_API_KEY = settings.value("API/GEMINI_API_KEY").toString();
+    
+    if (GEMINI_API_KEY.isEmpty()) {
+        qDebug() << "Warning: GEMINI_API_KEY not found in config.ini";
+        // Fallback to hardcoded key for development (remove in production)
+        GEMINI_API_KEY = "AIzaSyBYkxeqX0en7k7aF4Huk1-5YBgIqdnBQBA";
     }
 }

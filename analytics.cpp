@@ -115,7 +115,7 @@ QChart* StudyAnalytics::createProductivityChart(const QDate &startDate, const QD
     }
     if (series->count() == 0) qDebug() << "Productivity chart: no data for selected range.";
     chart->addSeries(series);
-    chart->setTitle("Study Detections Over Time");
+    chart->setTitle("Study Detections Over Time"); 
     QDateTimeAxis *axisX = new QDateTimeAxis();
     axisX->setFormat("MMM dd");
     axisX->setTitleText("Date");
@@ -123,7 +123,7 @@ QChart* StudyAnalytics::createProductivityChart(const QDate &startDate, const QD
     series->attachAxis(axisX);
     QValueAxis *axisY = new QValueAxis();
     axisY->setRange(0, 500); // You may want to adjust this dynamically
-    axisY->setTitleText("Detections Count");
+    axisY->setTitleText("Detections Count"); 
     chart->addAxis(axisY, Qt::AlignLeft);
     series->attachAxis(axisY);
     chart->setTheme(QChart::ChartThemeDark);
@@ -426,9 +426,9 @@ QChart* StudyAnalytics::createGoalCompletionChart(const QDate &startDate, const 
             incomplete++;
     }
     if (completed > 0)
-        series->append("Completed", completed);
+    series->append("Completed", completed);
     if (incomplete > 0)
-        series->append("Incomplete", incomplete);
+    series->append("Incomplete", incomplete);
 
     // Set colors explicitly for all slices and legend markers
     for (auto slice : series->slices()) {
@@ -496,7 +496,7 @@ QChart* StudyAnalytics::createSubjectTimeChart(const QDate &startDate, const QDa
     chart->addAxis(axisY, Qt::AlignLeft);
     series->attachAxis(axisY);
     return chart;
-} 
+}
 
 QChart* StudyAnalytics::createDistractionBarChart(const QDate &startDate, const QDate &endDate)
 {

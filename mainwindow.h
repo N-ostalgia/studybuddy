@@ -376,7 +376,7 @@ private:
 
     // Gemini API integration
     QNetworkAccessManager* geminiNetworkManager = nullptr;
-    QString GEMINI_API_KEY = "AIzaSyBYkxeqX0en7k7aF4Huk1-5YBgIqdnBQBA";
+    QString GEMINI_API_KEY;
 
     // Notification settings checkboxes
     QCheckBox *enableDesktopNotif = nullptr;
@@ -404,6 +404,9 @@ private:
     // Walkthrough overlay widget
     QPointer<WalkthroughOverlay> walkthroughOverlay;
     void startWalkthroughOverlay();
+    
+    // API Key management
+    void loadApiKey();
 };
 
 #endif // MAINWINDOW_H

@@ -8,3 +8,11 @@ build/
 bin/
 debug/
 release/
+
+# API Keys and Configuration
+config.ini
+api_keys.h
+api_keys.cpp
+*.key
+.env
+secrets.txt
